@@ -56,6 +56,9 @@
 #if !MESHTASTIC_EXCLUDE_WAYPOINT
 #include "modules/WaypointModule.h"
 #endif
+#if HAS_MVT_WSS_GATEWAY
+#include "modules/MvtWssGateway.h"
+#endif
 #if ARCH_PORTDUINO
 #include "input/LinuxInputImpl.h"
 #include "input/SeesawRotary.h"
@@ -297,6 +300,9 @@ void setupModules()
 #if !MESHTASTIC_EXCLUDE_RANGETEST && !MESHTASTIC_EXCLUDE_GPS
     if (moduleConfig.has_range_test && moduleConfig.range_test.enabled)
         new RangeTestModule();
+#endif
+#if HAS_MVT_WSS_GATEWAY
+    new MvtWssGateway();
 #endif
     // NOTE! This module must be added LAST because it likes to check for replies from other modules and avoid sending extra
     // acks

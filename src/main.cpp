@@ -404,7 +404,11 @@ void setup()
 
     meshtastic_Config_DisplayConfig_OledType screen_model =
         meshtastic_Config_DisplayConfig_OledType::meshtastic_Config_DisplayConfig_OledType_OLED_AUTO;
+#ifdef SCREEN_GEOMETRY
+    OLEDDISPLAY_GEOMETRY screen_geometry = SCREEN_GEOMETRY;
+#else
     OLEDDISPLAY_GEOMETRY screen_geometry = GEOMETRY_128_64;
+#endif
 
 #ifdef USE_SEGGER
     auto mode = false ? SEGGER_RTT_MODE_BLOCK_IF_FIFO_FULL : SEGGER_RTT_MODE_NO_BLOCK_TRIM;
