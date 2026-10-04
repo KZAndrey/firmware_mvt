@@ -234,6 +234,22 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp)
             sendJson(jsonBuf);
         }
     }
+    else if (mp.decoded.portnum == meshtastic_PortNum_WAYPOINT_APP) {
+        meshtastic_Waypoint wp = meshtastic_Waypoint_init_default;
+        pb_istream_t stream = pb_istream_from_buffer(mp.decoded.payload.bytes, mp.decoded.payload.size);
+        if (pb_decode(&stream, &meshtastic_Waypoint_msg, &wp)) {
+            double lat = wp.latitude_i / 1e7;
+            double lon = wp.longitude_i / 1e7;
+            bool isTarget = (strstr(wp.name, "Target") != nullptr) || (strstr(wp.description, "Target") != nullptr);
+
+            char jsonBuf[512];
+            snprintf(jsonBuf, sizeof(jsonBuf),
+                "{\"type\":\"WAYPOINT\",\"waypoint\":{\"title\":\"%s\",\"comment\":\"%s\",\"latitude\":%.6f,\"longitude\":%.6f,\"altitude\":0,\"isRadio\":true,\"isTarget\":%s}}",
+                wp.name, wp.description, lat, lon, isTarget ? "true" : "false"
+            );
+            sendJson(jsonBuf);
+        }
+    }
 
     return ProcessMessage::CONTINUE;
 }
@@ -265,6 +281,47 @@ void MvtWssGateway::handleIncomingCommand(const char *jsonStr)
                     service->sendToMesh(p, RX_SRC_LOCAL, true);
                     LOG_INFO("Downlink: Sent text to LoRa mesh (len=%d)", txtLen);
                 }
+            }
+        }
+    }
+
+    // Check for CMD_TX_LORA_WAYPOINT: {"type":"CMD_TX_LORA_WAYPOINT","waypoint":{"title":"...","latitude":...,"longitude":...}}
+    if (strstr(jsonStr, "CMD_TX_LORA_WAYPOINT") != nullptr) {
+        const char *latKey = strstr(jsonStr, "\"latitude\":");
+        const char *lonKey = strstr(jsonStr, "\"longitude\":");
+        if (latKey && lonKey) {
+            double lat = atof(latKey + 11);
+            double lon = atof(lonKey + 12);
+            char title[32] = "Target";
+            const char *titleKey = strstr(jsonStr, "\"title\":");
+            if (titleKey) {
+                titleKey += 8;
+                while (*titleKey == ' ' || *titleKey == '\"') titleKey++;
+                const char *endQuote = strchr(titleKey, '\"');
+                if (endQuote && endQuote > titleKey) {
+                    size_t tLen = min((size_t)(endQuote - titleKey), sizeof(title) - 1);
+                    memcpy(title, titleKey, tLen);
+                    title[tLen] = '\0';
+                }
+            }
+
+            meshtastic_Waypoint wp = meshtastic_Waypoint_init_default;
+            wp.id = millis() / 1000;
+            strncpy(wp.name, title, sizeof(wp.name) - 1);
+            wp.latitude_i = (int32_t)(lat * 1e7);
+            wp.longitude_i = (int32_t)(lon * 1e7);
+            wp.expire = UINT32_MAX;
+
+            meshtastic_MeshPacket *p = router->allocForSending();
+            if (p) {
+                p->decoded.portnum = meshtastic_PortNum_WAYPOINT_APP;
+                p->to = 0xFFFFFFFF;
+                p->from = nodeDB ? nodeDB->getNodeNum() : 0;
+                p->hop_limit = config.lora.hop_limit > 0 ? config.lora.hop_limit : 3;
+                p->decoded.payload.size = pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Waypoint_msg, &wp);
+
+                service->sendToMesh(p, RX_SRC_LOCAL, true);
+                LOG_INFO("Downlink: Transmitted Target Point '%s' (%.5f, %.5f) to LoRa mesh", title, lat, lon);
             }
         }
     }
