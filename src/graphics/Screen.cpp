@@ -141,6 +141,14 @@ static void drawMvtNetwork(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x
     mvtScreen::row(display, x, y + 11, upper);
     mvtScreen::row(display, x, y + 21, lower);
 }
+static void drawMvtRadio(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
+{
+    display->setColor(WHITE);
+    mvtScreen::row(display, x, y + 1, mvtScreen::presetLine(mvtWssGateway ? mvtWssGateway->radioPresetName() : "UNKNOWN"));
+    auto *radio = RadioLibInterface::instance;
+    mvtScreen::row(display, x, y + 11, mvtScreen::frequencyLine(radio ? radio->getFreq() : 0));
+    mvtScreen::row(display, x, y + 21, "HOPS:" + mvtScreen::count(mvtWssGateway ? mvtWssGateway->effectiveHopLimit() : config.lora.hop_limit));
+}
 static void drawMvtClock(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
     display->setColor(WHITE);
@@ -1073,6 +1081,7 @@ void Screen::setFrames(FrameFocus focus)
         fsi.positions.system = numframes;
         normalFrames[numframes++] = drawMvtStats;
         normalFrames[numframes++] = drawMvtNetwork;
+        normalFrames[numframes++] = drawMvtRadio;
         fsi.positions.clock = numframes;
         normalFrames[numframes++] = drawMvtClock;
         moduleFrames.clear();

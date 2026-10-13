@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <cstring>
+#include <cmath>
 #include "assets/MovetainLogo.h"
 
 namespace mvtScreen {
@@ -65,6 +66,22 @@ inline std::string networkName(const char *ssid, uint32_t tick) {
     value += "   ";
     size_t start = tick / 700 % value.size();
     return (value + value).substr(start, 10);
+}
+inline std::string presetLine(const char *name) {
+    std::string value = name ? name : "UNKNOWN";
+    if (value == "VERY_LONG_SLOW") return "V LONGSLOW";
+    if (value == "MEDIUM_SLOW") return "MED SLOW";
+    if (value == "MEDIUM_FAST") return "MED FAST";
+    if (value == "LONG_MODERATE") return "LONG MOD";
+    if (value == "SHORT_TURBO") return "SHT TURBO";
+    for (char &ch : value) if (ch == '_') ch = ' ';
+    return value;
+}
+inline std::string frequencyLine(double mhz) {
+    if (!std::isfinite(mhz) || mhz <= 0) return "FREQ:--";
+    char value[11];
+    snprintf(value, sizeof(value), mhz >= 1000 ? "%.2fMHZ" : "%.3fMHZ", mhz);
+    return value;
 }
 template<class Display> void clockLogo(Display *display, int x, int y) {
     // Sample only the mountain mark from the portal raster, without the wordmark.

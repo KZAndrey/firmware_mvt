@@ -249,6 +249,12 @@ void MvtWssGateway::publish(cJSON *p) {
     }
     outgoing.push_back(std::move(text));
 }
+uint8_t MvtWssGateway::effectiveHopLimit() const {
+    return portalHopLimit ? portalHopLimit : config.lora.hop_limit;
+}
+const char *MvtWssGateway::radioPresetName() const {
+    return config.lora.use_preset ? presetName(config.lora.modem_preset) : "CUSTOM";
+}
 cJSON *MvtWssGateway::gatewayInfo() {
     uint32_t id = nodeDB->getNodeNum();
     cJSON *p = nodeDocument(id);
@@ -272,7 +278,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setBool(p, "txEnabled", config.lora.tx_enabled);
     setNumber(p, "radioBattery", powerStatus ? powerStatus->getBatteryChargePercent() : 0);
     setNumber(p, "voltage", powerStatus ? powerStatus->getBatteryVoltageMv() / 1000.0 : 0);
-    setNumber(p, "hopLimit", portalHopLimit ? portalHopLimit : config.lora.hop_limit);
+    setNumber(p, "hopLimit", effectiveHopLimit());
     setNumber(p, "radioHopLimit", config.lora.hop_limit);
     setBool(p, "hopLimitControl", true);
     return p;
@@ -388,7 +394,7 @@ meshtastic_MeshPacket *MvtWssGateway::packet(uint32_t target, uint32_t id) {
     auto *p = router->allocForSending(); if (!p) return nullptr;
     p->to = target; p->from = nodeDB->getNodeNum(); if (id) p->id = id;
     p->channel = target == NODENUM_BROADCAST ? channels.getPrimaryIndex() : nodeDB->getMeshNodeChannel(target);
-    p->hop_limit = portalHopLimit ? portalHopLimit : config.lora.hop_limit; p->hop_start = p->hop_limit;
+    p->hop_limit = effectiveHopLimit(); p->hop_start = p->hop_limit;
     p->want_ack = target != NODENUM_BROADCAST;
     return p;
 }

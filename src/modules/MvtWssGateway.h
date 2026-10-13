@@ -21,6 +21,8 @@ public:
     static void handleWsEvent(void *, esp_event_base_t, int32_t, void *);
     bool isWsConnected() const { return authenticated && socketConnected; }
     const char *displayStatus() const;
+    uint8_t effectiveHopLimit() const;
+    const char *radioPresetName() const;
 protected:
     int32_t runOnce() override;
 private:

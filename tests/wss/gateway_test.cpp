@@ -292,7 +292,19 @@ int main(int argc, char **argv) {
     CHECK(mvtScreen::networkName("ShortSSID",0)=="ShortSSID");
     CHECK(mvtScreen::networkName("Galaxy S21 Ultra 5G",0)=="Galaxy S21");
     CHECK(mvtScreen::networkName("Galaxy S21 Ultra 5G",700)=="alaxy S21 ");
+    for (const char *preset : {"LONG_FAST", "LONG_SLOW", "VERY_LONG_SLOW", "MEDIUM_SLOW", "MEDIUM_FAST", "SHORT_SLOW", "SHORT_FAST", "LONG_MODERATE", "SHORT_TURBO", "CUSTOM"})
+        CHECK(mvtScreen::presetLine(preset).size() <= 10);
+    CHECK(mvtScreen::frequencyLine(439.225) == "439.225MHZ");
+    CHECK(mvtScreen::frequencyLine(2400.123) == "2400.12MHZ");
+    CHECK(mvtScreen::frequencyLine(0) == "FREQ:--");
+    CHECK(g.effectiveHopLimit() == config.lora.hop_limit);
     if (argc > 3) {
+        Canvas radioCanvas;
+        mvtScreen::row(&radioCanvas,0,1,mvtScreen::presetLine("LONG_FAST"));
+        mvtScreen::row(&radioCanvas,0,11,mvtScreen::frequencyLine(439.225));
+        mvtScreen::row(&radioCanvas,0,21,"HOPS:3");
+        std::ofstream radioImage(std::string(argv[3])+"/screen-radio.pgm",std::ios::binary);
+        radioImage << "P5\n64 32\n255\n"; radioImage.write(reinterpret_cast<char *>(radioCanvas.pixels),sizeof(radioCanvas.pixels));
         const char *names[] = {"online", "badkey", "stats", "long-room"};
         const char *lines[][3] = {{"R:ABC123","WIFI:OK","WSS:OK"},{"R:ABC123","WIFI:OK","WSS:BADKEY"},
                                   {"BAT:85%","N:12","R:123T:456"},{"R:ROOM_123","WIFI:OFF","WSS:WAIT"}};
