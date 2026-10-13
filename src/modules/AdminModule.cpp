@@ -877,7 +877,11 @@ bool AdminModule::handleSetModuleConfig(const meshtastic_ModuleConfig &c)
 
     switch (c.which_payload_variant) {
     case meshtastic_ModuleConfig_mqtt_tag:
-#if MESHTASTIC_EXCLUDE_MQTT
+#if HAS_MVT_WSS_GATEWAY
+        // The direct gateway reuses these fields; MQTT broker validation rejects WSS URLs.
+        moduleConfig.has_mqtt = true;
+        moduleConfig.mqtt = c.payload_variant.mqtt;
+#elif MESHTASTIC_EXCLUDE_MQTT
         LOG_WARN("Set module config: MESHTASTIC_EXCLUDE_MQTT is defined. Not setting MQTT config");
         return false;
 #else

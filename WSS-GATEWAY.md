@@ -158,3 +158,9 @@ The final row uses readable messages that fit ten characters:
 Wi-Fi shows OFF when disabled and WAIT when enabled but disconnected. WAIT
 alone cannot identify a wrong Wi-Fi password, unavailable AP, or signal loss.
 The Relay Key is never displayed. Other display sizes keep their original boot UI.
+
+WSS builds accept the MQTT configuration fields through the USB admin protocol
+without invoking MQTT broker validation. This is necessary for the WSS address,
+Room ID and Relay Key to persist when MQTT itself is excluded. The stock client's
+MQTT connection-test button does not validate the direct WSS gateway; use the
+OLED authenticated `WSS:OK` status and the gateway's portal connection instead.
