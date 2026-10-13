@@ -46,6 +46,7 @@ private:
     volatile bool socketConnected = false, inputFault = false, peerRejected = false;
     bool authenticated = false, authSent = false, authBlocked = false;
     bool snapshotPending = false;
+    uint8_t portalHopLimit = 0; // Zero means use the radio configuration.
     const char *displayError = nullptr;
     uint32_t lastHeartbeatMs = 0, lastConnectAttemptMs = 0, authStartedMs = 0;
     uint64_t serverTimeMs = 0;

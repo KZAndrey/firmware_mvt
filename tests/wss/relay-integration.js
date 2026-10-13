@@ -29,11 +29,13 @@ async function connect(url) {
   let gateway, coord;
   try {
     const room=api.getOrCreateRoom('ROOM1','relay-secret','coord-secret','spec-secret',{ownerUid:'test-owner',name:'WSS Test'});
+    room.state.wssHopLimit=2;
     await new Promise(resolve=>api.server.listen(0,'127.0.0.1',resolve));
     const url=`ws://127.0.0.1:${api.server.address().port}/ws`;
     gateway=await connect(url); const rows=fs.readFileSync(transcript,'utf8').trim().split('\n').map(JSON.parse);
     gateway.send(rows.find(e=>e.type==='AUTH_GATEWAY'));
     await until(()=>gateway.messages.some(e=>e.type==='AUTH_GATEWAY_SUCCESS'));
+    assert.equal(gateway.messages.find(e=>e.type==='AUTH_GATEWAY_SUCCESS').wssHopLimit,2);
     coord=await connect(url); coord.send({type:'AUTH',room:'ROOM1',key:'coord-secret',token:token('test-coordinator')});
     await until(()=>coord.messages.some(e=>e.type==='INIT_STATE'));
     assert(api.gatewayStatus(room).online);
@@ -75,6 +77,12 @@ async function connect(url) {
     assert.equal(gatewayMeta.longName,'Movetain Host');
     assert.equal(gatewayMeta.shortName,'MVT');
     assert.equal(gatewayMeta.frequency,'433.175 MHz');
+    coord.send({type:'CMD_SET_WSS_HOP_LIMIT',hopLimit:6});
+    await until(()=>gateway.messages.some(e=>e.type==='CMD_SET_WSS_HOP_LIMIT'));
+    assert.equal(room.state.wssHopLimit,6);
+    assert.equal(gateway.messages.find(e=>e.type==='CMD_SET_WSS_HOP_LIMIT').hopLimit,6);
+    api.saveRoomPersistentState(room);
+    assert.equal(api.loadRoomPersistentState(room.id).wssHopLimit,6);
     // Web coordinator downlink has the exact fields the firmware consumes.
     coord.send({type:'TX_LORA_CHAT',recipientId:0xaabbccdd,text:'Привет "поле"',senderCallsign:'HQ'});
     await until(()=>gateway.messages.some(e=>e.type==='CMD_TX_LORA_CHAT'));

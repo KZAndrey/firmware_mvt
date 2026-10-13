@@ -272,7 +272,9 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setBool(p, "txEnabled", config.lora.tx_enabled);
     setNumber(p, "radioBattery", powerStatus ? powerStatus->getBatteryChargePercent() : 0);
     setNumber(p, "voltage", powerStatus ? powerStatus->getBatteryVoltageMv() / 1000.0 : 0);
-    setNumber(p, "hopLimit", config.lora.hop_limit);
+    setNumber(p, "hopLimit", portalHopLimit ? portalHopLimit : config.lora.hop_limit);
+    setNumber(p, "radioHopLimit", config.lora.hop_limit);
+    setBool(p, "hopLimitControl", true);
     return p;
 }
 void MvtWssGateway::sendAuthGateway() {
@@ -386,7 +388,7 @@ meshtastic_MeshPacket *MvtWssGateway::packet(uint32_t target, uint32_t id) {
     auto *p = router->allocForSending(); if (!p) return nullptr;
     p->to = target; p->from = nodeDB->getNodeNum(); if (id) p->id = id;
     p->channel = target == NODENUM_BROADCAST ? channels.getPrimaryIndex() : nodeDB->getMeshNodeChannel(target);
-    p->hop_limit = config.lora.hop_limit; p->hop_start = p->hop_limit;
+    p->hop_limit = portalHopLimit ? portalHopLimit : config.lora.hop_limit; p->hop_start = p->hop_limit;
     p->want_ack = target != NODENUM_BROADCAST;
     return p;
 }
@@ -635,6 +637,8 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         return;
     }
     if (type == "AUTH_GATEWAY_SUCCESS") {
+        double hops = number(j.get(), "wssHopLimit");
+        portalHopLimit = hops >= 1 && hops <= 7 && floor(hops) == hops ? uint8_t(hops) : 0;
         if (!authSent) return;
         authenticated = true; displayError = nullptr; snapshotPending = true;
         LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0;
@@ -649,6 +653,12 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         return;
     }
     if (!authenticated || authBlocked) return;
+    if (type == "CMD_SET_WSS_HOP_LIMIT") {
+        double hops = number(j.get(), "hopLimit");
+        if (hops < 1 || hops > 7 || floor(hops) != hops) return;
+        portalHopLimit = uint8_t(hops);
+        sendHeartbeat(); return;
+    }
     if (type == "CMD_REFRESH_GATEWAY") { sendHeartbeat(); snapshotPending = true; return; }
     if (type == "WAYPOINT_DELETED" || type == "CMD_DELETE_WAYPOINT") {
         for (auto it = waypoints.begin(); it != waypoints.end();) {
