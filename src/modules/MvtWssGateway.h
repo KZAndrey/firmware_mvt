@@ -20,6 +20,7 @@ public:
     bool wantPacket(const meshtastic_MeshPacket *) override;
     static void handleWsEvent(void *, esp_event_base_t, int32_t, void *);
     bool isWsConnected() const { return authenticated && socketConnected; }
+    const char *displayStatus() const;
 protected:
     int32_t runOnce() override;
 private:
@@ -33,6 +34,7 @@ private:
     volatile bool socketConnected = false, inputFault = false, peerRejected = false;
     bool authenticated = false, authSent = false, authBlocked = false;
     bool snapshotPending = false;
+    const char *displayError = nullptr;
     uint32_t lastHeartbeatMs = 0, lastConnectAttemptMs = 0, authStartedMs = 0;
     uint64_t serverTimeMs = 0;
     uint32_t serverTimeTick = 0;

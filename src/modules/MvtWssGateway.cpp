@@ -97,6 +97,14 @@ MvtWssGateway::~MvtWssGateway() {
 bool MvtWssGateway::wantPacket(const meshtastic_MeshPacket *p) {
     return p && p->which_payload_variant == meshtastic_MeshPacket_decoded_tag;
 }
+const char *MvtWssGateway::displayStatus() const {
+    if (!moduleConfig.mqtt.enabled) return "OFF";
+    if (!moduleConfig.mqtt.username[0] || !moduleConfig.mqtt.password[0]) return "SETUP";
+    if (displayError) return displayError;
+    if (WiFi.status() != WL_CONNECTED) return "WAIT";
+    if (authenticated && socketConnected) return "OK";
+    return socketConnected ? "AUTH" : "OFF";
+}
 uint64_t MvtWssGateway::nowMs() const {
     uint32_t t = getValidTime(RTCQualityFromNet);
     if (t >= 1577836800) return uint64_t(t) * 1000;
@@ -156,7 +164,7 @@ void MvtWssGateway::connectWs() {
     size_t hostEnd = url.find('/', url.find("://") + 3);
     if (hostEnd == std::string::npos) url += "/ws";
     // Relay keys must never be sent in cleartext.
-    if (url.compare(0, 6, "wss://") != 0) { authBlocked = true; LOG_WARN("MVT requires wss://"); return; }
+    if (url.compare(0, 6, "wss://") != 0) { authBlocked = true; displayError = "BADURL"; LOG_WARN("MVT requires wss://"); return; }
     esp_websocket_client_config_t cfg = {};
     cfg.uri = url.c_str(); cfg.cert_pem = MVT_ROOT_CA;
     cfg.task_stack = 6144; cfg.buffer_size = 2048;
@@ -502,11 +510,13 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if (code == "NOT_AUTHENTICATED") { authenticated = false; authSent = false; return; }
         if (!authenticated || code == "GATEWAY_REPLACED" || code == "INVALID_RELAY_KEY" || code == "ADMIN_RESTRICTED")
             authBlocked = true;
+        if (authBlocked) displayError = code == "INVALID_RELAY_KEY" ? "BADKEY" : code == "ROOM_NOT_FOUND" ? "NOROOM" :
+            code == "GATEWAY_REPLACED" ? "TAKEN" : code == "ADMIN_RESTRICTED" ? "BLOCK" : "FAIL";
         return;
     }
     if (type == "AUTH_GATEWAY_SUCCESS") {
         if (!authSent) return;
-        authenticated = true; snapshotPending = true; lastHeartbeatMs = 0;
+        authenticated = true; displayError = nullptr; snapshotPending = true; lastHeartbeatMs = 0;
         // The ACK provides server time even on devices without GPS/NTP.
         sendHeartbeat(); return;
     }
@@ -623,7 +633,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
 int32_t MvtWssGateway::runOnce() {
     std::string room = moduleConfig.mqtt.username, secret = moduleConfig.mqtt.password, addr = moduleConfig.mqtt.address;
     if (room != configuredRoom || secret != configuredKey || addr != configuredAddress) {
-        disconnectWs(); authBlocked = false;
+        disconnectWs(); authBlocked = false; displayError = nullptr;
         outgoing.clear(); pending.clear(); completedCommands.clear();
         configuredRoom = room; configuredKey = secret; configuredAddress = addr;
     }
@@ -650,10 +660,10 @@ int32_t MvtWssGateway::runOnce() {
     for (int i = 0; i < 8 && incoming && xQueueReceive(incoming, &text, 0) == pdTRUE; ++i) {
         handleIncomingCommand(text); free(text);
     }
-    if (peerRejected) { authBlocked = true; peerRejected = false; }
+    if (peerRejected) { authBlocked = true; if (!displayError) displayError = "BLOCK"; peerRejected = false; }
     if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked || inputFault) {
         if (wsClient) disconnectWs();
-        if (!moduleConfig.mqtt.enabled) authBlocked = false;
+        if (!moduleConfig.mqtt.enabled) { authBlocked = false; displayError = nullptr; }
         return 1000;
     }
     if (!socketConnected) {

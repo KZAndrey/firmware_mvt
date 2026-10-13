@@ -201,7 +201,7 @@ void NotificationRenderer::drawNumberPicker(OLEDDisplay *display, OLEDDisplayUiS
         return;
 
     uint16_t totalLines = lineCount + 2;
-    const char *linePointers[totalLines + 1] = {0}; // this is sort of a dynamic allocation
+    std::vector<const char *> linePointers(totalLines + 1, nullptr); // this is sort of a dynamic allocation
 
     // copy the linestarts to display to the linePointers holder
     for (uint16_t i = 0; i < lineCount; i++) {
@@ -222,7 +222,7 @@ void NotificationRenderer::drawNumberPicker(OLEDDisplay *display, OLEDDisplayUiS
     linePointers[lineCount++] = digits.c_str();
     linePointers[lineCount++] = arrowPointer.c_str();
 
-    drawNotificationBox(display, state, linePointers, totalLines, 0);
+    drawNotificationBox(display, state, linePointers.data(), totalLines, 0);
 }
 
 void NotificationRenderer::drawNodePicker(OLEDDisplay *display, OLEDDisplayUiState *state)
@@ -280,13 +280,15 @@ void NotificationRenderer::drawNodePicker(OLEDDisplay *display, OLEDDisplayUiSta
     uint8_t effectiveLineHeight = FONT_HEIGHT_SMALL - 3;
     uint8_t visibleTotalLines = std::min<uint8_t>(totalLines, (screenHeight - vPadding * 2) / effectiveLineHeight);
     uint8_t linesShown = lineCount;
-    const char *linePointers[visibleTotalLines + 1] = {0}; // this is sort of a dynamic allocation
+    // Include every copied heading line and the terminating null, even when
+    // only two lines fit the 64x32 OLED.
+    std::vector<const char *> linePointers(totalLines + 1, nullptr);
 
     // copy the linestarts to display to the linePointers holder
     for (int i = 0; i < lineCount; i++) {
         linePointers[i] = lineStarts[i];
     }
-    char scratchLineBuffer[visibleTotalLines - lineCount][40];
+    char scratchLineBuffer[std::max<int>(1, int(visibleTotalLines) - int(lineCount))][40];
 
     uint8_t firstOptionToShow = 0;
     if (curSelected > 1 && alertBannerOptions > visibleTotalLines - lineCount) {
@@ -324,7 +326,7 @@ void NotificationRenderer::drawNodePicker(OLEDDisplay *display, OLEDDisplayUiSta
         }
         linePointers[linesShown] = scratchLineBuffer[scratchLineNum++];
     }
-    drawNotificationBox(display, state, linePointers, totalLines, firstOptionToShow);
+    drawNotificationBox(display, state, linePointers.data(), totalLines, firstOptionToShow);
 }
 
 void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisplayUiState *state)
@@ -332,7 +334,7 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
     // === Layout Configuration ===
     constexpr uint16_t vPadding = 2;
 
-    uint16_t optionWidths[alertBannerOptions] = {0};
+    std::vector<uint16_t> optionWidths(alertBannerOptions, 0);
     uint16_t maxWidth = 0;
     uint16_t arrowsWidth = display->getStringWidth(">  <", 4, true);
     uint16_t lineWidths[MAX_LINES] = {0};
@@ -410,7 +412,9 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
     uint8_t effectiveLineHeight = FONT_HEIGHT_SMALL - 3;
     uint8_t visibleTotalLines = std::min<uint8_t>(totalLines, (screenHeight - vPadding * 2) / effectiveLineHeight);
     uint8_t linesShown = lineCount;
-    const char *linePointers[visibleTotalLines + 1] = {0}; // this is sort of a dynamic allocation
+    // The onboarding banner has four heading lines but a 64x32 OLED fits
+    // only two. Sizing this array to the visible count overwrites the stack.
+    std::vector<const char *> linePointers(totalLines + 1, nullptr);
 
     // copy the linestarts to display to the linePointers holder
     for (int i = 0; i < lineCount; i++) {
@@ -437,13 +441,9 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
     for (int i = firstOptionToShow; i < alertBannerOptions && linesShown < visibleTotalLines; i++, linesShown++) {
         if (i == curSelected) {
             if (isHighResolution) {
-                strncpy(lineBuffer, "> ", 3);
-                strncpy(lineBuffer + 2, optionsArrayPtr[i], 36);
-                strncpy(lineBuffer + strlen(optionsArrayPtr[i]) + 2, " <", 3);
+                snprintf(lineBuffer, sizeof(lineBuffer), "> %.34s <", optionsArrayPtr[i]);
             } else {
-                strncpy(lineBuffer, ">", 2);
-                strncpy(lineBuffer + 1, optionsArrayPtr[i], 37);
-                strncpy(lineBuffer + strlen(optionsArrayPtr[i]) + 1, "<", 2);
+                snprintf(lineBuffer, sizeof(lineBuffer), ">%.36s<", optionsArrayPtr[i]);
             }
             lineBuffer[39] = '\0';
             linePointers[linesShown] = lineBuffer;
@@ -452,15 +452,16 @@ void NotificationRenderer::drawAlertBannerOverlay(OLEDDisplay *display, OLEDDisp
         }
     }
     if (alertBannerOptions > 0) {
-        drawNotificationBox(display, state, linePointers, totalLines, firstOptionToShow, maxWidth);
+        drawNotificationBox(display, state, linePointers.data(), totalLines, firstOptionToShow, maxWidth);
     } else {
-        drawNotificationBox(display, state, linePointers, totalLines, firstOptionToShow);
+        drawNotificationBox(display, state, linePointers.data(), totalLines, firstOptionToShow);
     }
 }
 
 void NotificationRenderer::drawNotificationBox(OLEDDisplay *display, OLEDDisplayUiState *state, const char *lines[],
                                                uint16_t totalLines, uint8_t firstOptionToShow, uint16_t maxWidth)
 {
+    if (!display || !lines || totalLines == 0) return;
 
     bool is_picker = false;
     uint16_t lineCount = 0;
@@ -468,8 +469,8 @@ void NotificationRenderer::drawNotificationBox(OLEDDisplay *display, OLEDDisplay
     constexpr uint16_t hPadding = 5;
     constexpr uint16_t vPadding = 2;
     bool needs_bell = false;
-    uint16_t lineWidths[totalLines] = {0};
-    uint16_t lineLengths[totalLines] = {0};
+    std::vector<uint16_t> lineWidths(totalLines, 0);
+    std::vector<uint16_t> lineLengths(totalLines, 0);
 
     if (maxWidth != 0)
         is_picker = true;
@@ -478,7 +479,7 @@ void NotificationRenderer::drawNotificationBox(OLEDDisplay *display, OLEDDisplay
     display->setFont(FONT_SMALL);
     display->setTextAlignment(TEXT_ALIGN_LEFT);
 
-    while (lines[lineCount] != nullptr) {
+    while (lineCount < totalLines && lines[lineCount] != nullptr) {
         auto newlinePointer = strchr(lines[lineCount], '\n');
         if (newlinePointer)
             lineLengths[lineCount] = (newlinePointer - lines[lineCount]); // Check for newlines first

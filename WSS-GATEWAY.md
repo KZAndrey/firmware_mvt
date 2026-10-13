@@ -95,3 +95,42 @@ python tests/wss/run.py --zig .tools/zig-windows-x86_64-0.13.0/zig.exe --relay .
 Compilation logs, vectors and actual firmware events are stored under
 `.tools/wss-tests/`, which is ignored by Git. Real radio range, WiFi/TLS on the
 physical board and end-to-end LoRa delivery still require a hardware run.
+
+## Compact OLED (64x32)
+
+The direct gateway uses two pages, switched with the existing USER button:
+
+- Main page: `R:<Room ID>`, `WIFI:OK/OFF`, and `WSS:<state>`. Room IDs longer
+  than eight characters scroll through the full ID. Relay Key is never rendered.
+- Statistics: battery/USB, known radio node count excluding the gateway, and
+  actual RadioLib RX/TX counters. An unset radio region shows `REG:UNSET` instead
+  of the node count; configure the region through the Meshtastic USB client.
+
+The fixed 5x7 ASCII font fits three rows without the ordinary Meshtastic header
+or navigation overlay. WSS states distinguish `OK` (authenticated), `AUTH`,
+`OFF`, `WAIT`, `SETUP`, `BADKEY`, `NOROOM`, `BLOCK`, `TAKEN`, `BADURL` and `FAIL`.
+All other display geometries retain their normal UI.
+
+The boot loop observed on the first 64x32 board boot with region UNSET exposed
+an out-of-bounds array in the legacy onboarding notification. It allocated line
+pointers for visible rows then copied all four heading rows, overwriting the
+array/null sentinel. Notification buffers now include every copied row and
+bounded traversal; long selectable labels are formatted with an explicit limit.
+Compact mode bypasses the large onboarding overlay and invisible legacy menus.
+The native regression compiles the actual notification functions with a display
+adapter and exercises the 64x32 welcome banner, options, long labels and missing
+sentinel. Run it after the host WSS tests:
+
+```powershell
+python tests/wss/banner_regression.py .tools/zig-windows-x86_64-0.13.0/zig.exe
+```
+
+## Flashing the standalone factory image
+
+Do not upload the standalone `.factory.bin` to Meshtastic Web Flasher's legacy
+clean-install path: it reuses a selected raw file for firmware, OTA and filesystem
+writes. A 1.8MB factory image written to filesystem offset `0x670000` overruns
+8MB flash and can overwrite the bootloader. Use ESP Tool/esptool to write the
+factory file **once at `0x0`**, with DIO, 80MHz and 8MB settings. A release zip for
+Meshtastic Web Flasher requires separate correctly named firmware/OTA/filesystem
+assets; the standalone factory file is not that zip.

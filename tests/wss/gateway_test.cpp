@@ -18,6 +18,7 @@
 #undef protected
 #undef private
 #include "modules/MvtPayload.h"
+#include "graphics/MvtCompactScreen.h"
 uint32_t testMillis = 20000;
 meshtastic_LocalConfig config = meshtastic_LocalConfig_init_default;
 meshtastic_LocalModuleConfig moduleConfig = meshtastic_LocalModuleConfig_init_default;
@@ -175,6 +176,41 @@ int main(int argc, char **argv) {
     g.inputFault = false;
     frame(g, "{\"type\":\"ERROR\",\"code\":\"GATEWAY_REPLACED\"}");
     g.socketConnected = false; g.runOnce(); CHECK(g.authBlocked); CHECK(!g.socketConnected);
+    CHECK(std::string(g.displayStatus()) == "TAKEN");
+    command(g, "{\"type\":\"ERROR\",\"code\":\"INVALID_RELAY_KEY\"}"); CHECK(std::string(g.displayStatus()) == "BADKEY");
+    command(g, "{\"type\":\"ERROR\",\"code\":\"ROOM_NOT_FOUND\"}"); CHECK(std::string(g.displayStatus()) == "NOROOM");
+    moduleConfig.mqtt.enabled = false; CHECK(std::string(g.displayStatus()) == "OFF"); moduleConfig.mqtt.enabled = true;
+    g.displayError = nullptr; g.authenticated = false; g.socketConnected = true;
+    CHECK(std::string(g.displayStatus()) == "AUTH");
+    g.authenticated = true; CHECK(std::string(g.displayStatus()) == "OK");
+    g.socketConnected = false; CHECK(std::string(g.displayStatus()) == "OFF");
+    CHECK(mvtScreen::roomLine("ABC123", 0) == "R:ABC123");
+    const std::string longRoom = "ROOM_1234567890";
+    std::string visible;
+    for (unsigned i=0;i<longRoom.size()+3;++i) {
+        auto line = mvtScreen::roomLine(longRoom.c_str(), i*700);
+        CHECK(line.size() == 10); visible += line.substr(2,1);
+    }
+    CHECK(visible == longRoom + "   ");
+    for (uint32_t value : {0U,999U,1000U,99999U,100000U,1000000U,UINT32_MAX}) {
+        CHECK(mvtScreen::count(value).size() <= 3);
+        CHECK(("R:"+mvtScreen::count(value)+"T:"+mvtScreen::count(value)).size() <= 10);
+    }
+    struct Canvas {
+        uint8_t pixels[64*32] = {};
+        void setPixel(int x,int y) { if (!(x>=0 && x<64 && y>=0 && y<32)) { CHECK(false); } pixels[y*64+x]=255; }
+    };
+    if (argc > 3) {
+        const char *names[] = {"online", "badkey", "stats", "long-room"};
+        const char *lines[][3] = {{"R:ABC123","WIFI:OK","WSS:OK"},{"R:ABC123","WIFI:OK","WSS:BADKEY"},
+                                  {"BAT:85%","N:12","R:123T:456"},{"R:ROOM_123","WIFI:OFF","WSS:WAIT"}};
+        for (unsigned i=0;i<4;++i) {
+            Canvas canvas;
+            for(int row=0;row<3;++row) mvtScreen::row(&canvas,0,1+row*10,lines[i][row]);
+            std::ofstream image(std::string(argv[3])+"/screen-"+names[i]+".pgm",std::ios::binary);
+            image << "P5\n64 32\n255\n"; image.write(reinterpret_cast<char *>(canvas.pixels),sizeof(canvas.pixels));
+        }
+    }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {
         std::ifstream vectors(argv[1]); std::string line;

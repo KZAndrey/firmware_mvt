@@ -64,6 +64,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "modules/WaypointModule.h"
 #include "sleep.h"
 #include "target_specific.h"
+#if HAS_MVT_WSS_GATEWAY
+#include "modules/MvtWssGateway.h"
+#include "graphics/MvtCompactScreen.h"
+#endif
 
 using graphics::Emote;
 using graphics::emotes;
@@ -92,6 +96,41 @@ using namespace meshtastic; /** @todo remove */
 
 namespace graphics
 {
+#if HAS_MVT_WSS_GATEWAY
+static void drawMvtStatus(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
+{
+    display->setColor(WHITE);
+    mvtScreen::row(display, x, y + 1, mvtScreen::roomLine(moduleConfig.mqtt.username, millis()));
+    mvtScreen::row(display, x, y + 11, WiFi.status() == WL_CONNECTED ? "WIFI:OK" : "WIFI:OFF");
+    mvtScreen::row(display, x, y + 21, std::string("WSS:") + (mvtWssGateway ? mvtWssGateway->displayStatus() : "OFF"));
+}
+static void drawMvtStats(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
+{
+    display->setColor(WHITE);
+    char battery[11];
+    if (powerStatus && powerStatus->getHasBattery())
+        snprintf(battery, sizeof(battery), "BAT:%u%%", unsigned(powerStatus->getBatteryChargePercent()));
+    else snprintf(battery, sizeof(battery), "BAT:USB");
+    mvtScreen::row(display, x, y + 1, battery);
+    unsigned count = 0;
+    for (size_t i = 0; i < nodeDB->getNumMeshNodes(); ++i) {
+        auto *n = nodeDB->getMeshNodeByIndex(i);
+        if (n->num != nodeDB->getNodeNum() && !n->is_ignored) ++count;
+    }
+    mvtScreen::row(display, x, y + 11, config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_UNSET ?
+                                        "REG:UNSET" : "N:" + mvtScreen::count(count));
+    auto *radio = RadioLibInterface::instance;
+    mvtScreen::row(display, x, y + 21, "R:" + mvtScreen::count(radio ? radio->rxGood : 0) +
+                                      "T:" + mvtScreen::count(radio ? radio->txGood : 0));
+}
+static void drawMvtFault(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
+{
+    display->setColor(WHITE);
+    mvtScreen::row(display, x, y + 1, "FAULT");
+    mvtScreen::row(display, x, y + 11, "CODE:" + mvtScreen::count(error_code));
+    mvtScreen::row(display, x, y + 21, "CHECK LOG");
+}
+#endif
 
 // This means the *visible* area (sh1106 can address 132, but shows 128 for example)
 #define IDLE_FRAMERATE 1 // in fps
@@ -171,6 +210,9 @@ void Screen::showOverlayBanner(BannerOverlayOptions banner_overlay_options)
     NotificationRenderer::current_notification_type = notificationTypeEnum::selection_picker;
     static OverlayCallback overlays[] = {graphics::UIRenderer::drawNavigationBar, NotificationRenderer::drawBannercallback};
     ui->setOverlays(overlays, sizeof(overlays) / sizeof(overlays[0]));
+#if HAS_MVT_WSS_GATEWAY
+    if (displayWidth == 64 && displayHeight == 32) ui->setOverlays(nullptr, 0);
+#endif
     ui->setTargetFPS(60);
     ui->update();
 }
@@ -755,7 +797,11 @@ int32_t Screen::runOnce()
 #endif
 
 #ifndef DISABLE_WELCOME_UNSET
-    if (!NotificationRenderer::isOverlayBannerShowing() && config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_UNSET) {
+    if (!NotificationRenderer::isOverlayBannerShowing() && config.lora.region == meshtastic_Config_LoRaConfig_RegionCode_UNSET
+#if HAS_MVT_WSS_GATEWAY
+        && !(displayWidth == 64 && displayHeight == 32)
+#endif
+    ) {
 #if defined(M5STACK_UNITC6L)
         menuHandler::LoraRegionPicker();
 #else
@@ -969,6 +1015,31 @@ void Screen::setFrames(FrameFocus focus)
         indicatorIcons.push_back(icon_error);
         focus = FOCUS_FAULT; // Change our "focus" parameter, to ensure we show the fault frame
     }
+#if HAS_MVT_WSS_GATEWAY
+    if (dispdev->getWidth() == 64 && dispdev->getHeight() == 32) {
+        if (error_code) normalFrames[0] = drawMvtFault;
+        fsi.positions.home = numframes;
+        fsi.positions.deviceFocused = numframes;
+        normalFrames[numframes++] = drawMvtStatus;
+        fsi.positions.system = numframes;
+        normalFrames[numframes++] = drawMvtStats;
+        moduleFrames.clear();
+        fsi.frameCount = numframes;
+        this->frameCount = numframes;
+        ui->setFrames(normalFrames, numframes);
+        ui->disableAllIndicators();
+        ui->disableAutoTransition();
+        // Standard headers/navigation are taller than this OLED. The USER
+        // button uses the existing nextFrame handler to switch these pages.
+        ui->setOverlays(nullptr, 0);
+        uint8_t target = focus == FOCUS_FAULT ? 0 : focus == FOCUS_SYSTEM ? fsi.positions.system : fsi.positions.home;
+        if (focus == FOCUS_PRESERVE && originalPosition < numframes) target = originalPosition;
+        ui->switchToFrame(target);
+        this->framesetInfo = fsi;
+        setFastFramerate();
+        return;
+    }
+#endif
 
 #if defined(DISPLAY_CLOCK_FRAME)
     if (!hiddenFrames.clock) {
@@ -1551,6 +1622,14 @@ int Screen::handleInputEvent(const InputEvent *event)
 {
     if (!screenOn)
         return 0;
+#if HAS_MVT_WSS_GATEWAY
+    if (displayWidth == 64 && displayHeight == 32 && showingNormalScreen) {
+        if (event->inputEvent == INPUT_BROKER_LEFT || event->inputEvent == INPUT_BROKER_ALT_PRESS) showPrevFrame();
+        else if (event->inputEvent == INPUT_BROKER_RIGHT || event->inputEvent == INPUT_BROKER_USER_PRESS ||
+                 event->inputEvent == INPUT_BROKER_SELECT) showNextFrame();
+        return 0;
+    }
+#endif
 
     // Handle text input notifications specially - pass input to virtual keyboard
     if (NotificationRenderer::current_notification_type == notificationTypeEnum::text_input) {

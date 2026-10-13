@@ -34,6 +34,6 @@ with (build / 'compile.log').open('w', encoding='utf-8') as log:
                     'src/modules/MvtWssGateway.cpp', *generated, *objects, '-o', str(exe)],
                    env=env, stdout=log, stderr=log, check=True)
 subprocess.run(['node', 'tests/wss/portal-vectors.js', args.relay, str(build / 'vectors.jsonl')], check=True)
-subprocess.run([str(exe), str(build / 'vectors.jsonl'), str(build / 'transcript.jsonl')], check=True)
+subprocess.run([str(exe), str(build / 'vectors.jsonl'), str(build / 'transcript.jsonl'), str(build)], check=True)
 subprocess.run(['node', 'tests/wss/portal-contract.js', args.relay, str(build / 'transcript.jsonl')], check=True)
 subprocess.run(['node', 'tests/wss/relay-integration.js', args.relay, str(build / 'transcript.jsonl')], check=True)
