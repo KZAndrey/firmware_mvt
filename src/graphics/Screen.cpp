@@ -68,6 +68,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "modules/MvtWssGateway.h"
 #include "graphics/MvtCompactScreen.h"
 #include <time.h>
+#include <esp_heap_caps.h>
 #endif
 
 using graphics::Emote;
@@ -148,6 +149,16 @@ static void drawMvtRadio(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, 
     auto *radio = RadioLibInterface::instance;
     mvtScreen::row(display, x, y + 11, mvtScreen::frequencyLine(radio ? radio->getFreq() : 0));
     mvtScreen::row(display, x, y + 21, "HOPS:" + mvtScreen::count(mvtWssGateway ? mvtWssGateway->effectiveHopLimit() : config.lora.hop_limit));
+}
+static void drawMvtMemory(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
+{
+    display->setColor(WHITE);
+    // Measure allocatable internal RAM, without counting PSRAM or instruction-only memory.
+    multi_heap_info_t heap = {};
+    heap_caps_get_info(&heap, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    mvtScreen::row(display, x, y + 1, mvtScreen::memoryLine("FREE", heap.total_free_bytes));
+    mvtScreen::row(display, x, y + 11, mvtScreen::memoryLine("MIN", heap.minimum_free_bytes));
+    mvtScreen::row(display, x, y + 21, mvtScreen::memoryLine("BLOCK", heap.largest_free_block));
 }
 static void drawMvtClock(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
@@ -1082,6 +1093,7 @@ void Screen::setFrames(FrameFocus focus)
         normalFrames[numframes++] = drawMvtStats;
         normalFrames[numframes++] = drawMvtNetwork;
         normalFrames[numframes++] = drawMvtRadio;
+        normalFrames[numframes++] = drawMvtMemory;
         fsi.positions.clock = numframes;
         normalFrames[numframes++] = drawMvtClock;
         moduleFrames.clear();

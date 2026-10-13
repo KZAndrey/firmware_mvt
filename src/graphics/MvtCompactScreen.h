@@ -83,6 +83,11 @@ inline std::string frequencyLine(double mhz) {
     snprintf(value, sizeof(value), mhz >= 1000 ? "%.2fMHZ" : "%.3fMHZ", mhz);
     return value;
 }
+inline std::string memoryLine(const char *label, uint32_t bytes) {
+    char value[11];
+    snprintf(value, sizeof(value), "%s:%luK", label, static_cast<unsigned long>(bytes / 1024));
+    return value;
+}
 template<class Display> void clockLogo(Display *display, int x, int y) {
     // Sample only the mountain mark from the portal raster, without the wordmark.
     for (int py=0;py<14;++py) for (int px=0;px<24;++px) {

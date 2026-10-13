@@ -298,7 +298,17 @@ int main(int argc, char **argv) {
     CHECK(mvtScreen::frequencyLine(2400.123) == "2400.12MHZ");
     CHECK(mvtScreen::frequencyLine(0) == "FREQ:--");
     CHECK(g.effectiveHopLimit() == config.lora.hop_limit);
+    CHECK(mvtScreen::memoryLine("FREE", 168*1024) == "FREE:168K");
+    CHECK(mvtScreen::memoryLine("MIN", 112*1024+1023) == "MIN:112K");
+    CHECK(mvtScreen::memoryLine("BLOCK", 0) == "BLOCK:0K");
+    CHECK(mvtScreen::memoryLine("BLOCK", 512*1024).size() <= 10);
     if (argc > 3) {
+        Canvas memoryCanvas;
+        mvtScreen::row(&memoryCanvas,0,1,mvtScreen::memoryLine("FREE",168*1024));
+        mvtScreen::row(&memoryCanvas,0,11,mvtScreen::memoryLine("MIN",112*1024));
+        mvtScreen::row(&memoryCanvas,0,21,mvtScreen::memoryLine("BLOCK",96*1024));
+        std::ofstream memoryImage(std::string(argv[3])+"/screen-memory.pgm",std::ios::binary);
+        memoryImage << "P5\n64 32\n255\n"; memoryImage.write(reinterpret_cast<char *>(memoryCanvas.pixels),sizeof(memoryCanvas.pixels));
         Canvas radioCanvas;
         mvtScreen::row(&radioCanvas,0,1,mvtScreen::presetLine("LONG_FAST"));
         mvtScreen::row(&radioCanvas,0,11,mvtScreen::frequencyLine(439.225));
