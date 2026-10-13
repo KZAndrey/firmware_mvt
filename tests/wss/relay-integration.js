@@ -40,12 +40,29 @@ async function connect(url) {
     // Actual produced node telemetry survives current server sanitizers/storage.
     for(const e of rows.filter(e=>['NODE_UPDATE','CHAT_MESSAGE','PING_RESULT','POLL_ENV_RESULT','TRACEROUTE_RESULT'].includes(e.type))) {
       // Rebase the deterministic host clock fixture to the live test server.
-      if(e.node)e.node.lastUpdateMs=Date.now(); if(e.message)e.message.timestampMs=Date.now(); gateway.send(e);
+      if(e.node && e.node.lastUpdateMs)e.node.lastUpdateMs=Date.now(); if(e.message)e.message.timestampMs=Date.now(); gateway.send(e);
     }
     await until(()=>room.state.participants.has('!aabbccdd_mv'));
     const node=room.state.participants.get('!aabbccdd_mv');
     assert.equal(node.heartRate,101); assert.equal(node.alt,-20); assert.equal(node.callsign,'Offline');
     assert(node.lastUpdateMs>=1577836800000); assert(room.state.trackHistory.get('!aabbccdd_mv').length>0);
+    // Historical/partial snapshots cannot erase newer position or full name.
+    const nativeKey='!aabbccdd', liveTime=Date.now();
+    gateway.send({type:'NODE_UPDATE',node:{nodeKey:nativeKey,nodeId:0xaabbccdd,callsign:'A',
+      longName:'Field station',lat:49.95,lon:82.63,lastUpdateMs:liveTime}});
+    await until(()=>room.state.participants.get(nativeKey)?.longName==='Field station');
+    const before=coord.messages.filter(e=>e.type==='NODE_UPDATE'&&e.nodeKey===nativeKey).length;
+    gateway.send({type:'NODE_UPDATE',snapshot:true,node:{nodeKey:nativeKey,nodeId:0xaabbccdd,callsign:'A',
+      lat:49,lon:82,lastUpdateMs:1700000000000}});
+    await until(()=>coord.messages.filter(e=>e.type==='NODE_UPDATE'&&e.nodeKey===nativeKey).length>before);
+    assert.equal(room.state.participants.get(nativeKey).lat,49.95);
+    assert.equal(room.state.participants.get(nativeKey).longName,'Field station');
+    assert.equal(room.state.participants.get(nativeKey).lastUpdateMs,liveTime);
+    const gatewayMeta=api.gatewayStatus(room).gatewayInfo;
+    assert.equal(gatewayMeta.gatewayType,'WSS');
+    assert.equal(gatewayMeta.longName,'Movetain Host');
+    assert.equal(gatewayMeta.shortName,'MVT');
+    assert.equal(gatewayMeta.frequency,'433.175 MHz');
     // Web coordinator downlink has the exact fields the firmware consumes.
     coord.send({type:'TX_LORA_CHAT',recipientId:0xaabbccdd,text:'Привет "поле"',senderCallsign:'HQ'});
     await until(()=>gateway.messages.some(e=>e.type==='CMD_TX_LORA_CHAT'));

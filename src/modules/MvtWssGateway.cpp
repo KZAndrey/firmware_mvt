@@ -81,6 +81,52 @@ void airMetrics(cJSON *n, const meshtastic_AirQualityMetrics &m, bool result = f
     if (m.has_pm_humidity) setNumber(n, "humidity", m.pm_humidity);
     if (m.has_co2) setNumber(n, "co2", m.co2);
 }
+const char *regionName(int value) {
+    switch (value) {
+    case meshtastic_Config_LoRaConfig_RegionCode_UNSET: return "UNSET";
+    case meshtastic_Config_LoRaConfig_RegionCode_US: return "US";
+    case meshtastic_Config_LoRaConfig_RegionCode_EU_433: return "EU_433";
+    case meshtastic_Config_LoRaConfig_RegionCode_EU_868: return "EU_868";
+    case meshtastic_Config_LoRaConfig_RegionCode_CN: return "CN";
+    case meshtastic_Config_LoRaConfig_RegionCode_JP: return "JP";
+    case meshtastic_Config_LoRaConfig_RegionCode_ANZ: return "ANZ";
+    case meshtastic_Config_LoRaConfig_RegionCode_KR: return "KR";
+    case meshtastic_Config_LoRaConfig_RegionCode_TW: return "TW";
+    case meshtastic_Config_LoRaConfig_RegionCode_RU: return "RU";
+    case meshtastic_Config_LoRaConfig_RegionCode_IN: return "IN";
+    case meshtastic_Config_LoRaConfig_RegionCode_NZ_865: return "NZ_865";
+    case meshtastic_Config_LoRaConfig_RegionCode_TH: return "TH";
+    case meshtastic_Config_LoRaConfig_RegionCode_LORA_24: return "LORA_24";
+    case meshtastic_Config_LoRaConfig_RegionCode_UA_433: return "UA_433";
+    case meshtastic_Config_LoRaConfig_RegionCode_UA_868: return "UA_868";
+    case meshtastic_Config_LoRaConfig_RegionCode_MY_433: return "MY_433";
+    case meshtastic_Config_LoRaConfig_RegionCode_MY_919: return "MY_919";
+    case meshtastic_Config_LoRaConfig_RegionCode_SG_923: return "SG_923";
+    case meshtastic_Config_LoRaConfig_RegionCode_PH_433: return "PH_433";
+    case meshtastic_Config_LoRaConfig_RegionCode_PH_868: return "PH_868";
+    case meshtastic_Config_LoRaConfig_RegionCode_PH_915: return "PH_915";
+    case meshtastic_Config_LoRaConfig_RegionCode_ANZ_433: return "ANZ_433";
+    case meshtastic_Config_LoRaConfig_RegionCode_KZ_433: return "KZ_433";
+    case meshtastic_Config_LoRaConfig_RegionCode_KZ_863: return "KZ_863";
+    case meshtastic_Config_LoRaConfig_RegionCode_NP_865: return "NP_865";
+    case meshtastic_Config_LoRaConfig_RegionCode_BR_902: return "BR_902";
+    default: return "UNKNOWN";
+    }
+}
+const char *presetName(int value) {
+    switch (value) {
+    case meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST: return "LONG_FAST";
+    case meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW: return "LONG_SLOW";
+    case meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW: return "VERY_LONG_SLOW";
+    case meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW: return "MEDIUM_SLOW";
+    case meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST: return "MEDIUM_FAST";
+    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_SLOW: return "SHORT_SLOW";
+    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST: return "SHORT_FAST";
+    case meshtastic_Config_LoRaConfig_ModemPreset_LONG_MODERATE: return "LONG_MODERATE";
+    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO: return "SHORT_TURBO";
+    default: return "UNKNOWN";
+    }
+}
 const size_t MAX_FRAME = 16384, MAX_NODES = 96, MAX_EVENTS = 32, MAX_PENDING = 16;
 const uint32_t ACK_TIMEOUT = 120000;
 }
@@ -210,6 +256,8 @@ cJSON *MvtWssGateway::gatewayInfo() {
     char channel[48]; snprintf(channel, sizeof(channel), "%s (Ch %u)", channels.getName(channels.getPrimaryIndex()),
                                unsigned(channels.getPrimaryIndex()));
     setString(p, "channelName", channel);
+    setString(p, "region", regionName(config.lora.region));
+    setString(p, "modemPreset", config.lora.use_preset ? presetName(config.lora.modem_preset) : "CUSTOM");
     setString(p, "transport", "Direct WSS (WiFi)");
     setString(p, "firmwareVersion", xstr(APP_VERSION));
     setBool(p, "radioConnected", radio && radio->getFreq() > 0);
@@ -304,6 +352,7 @@ void MvtWssGateway::sendSnapshot() {
     if (!snapshot.empty()) {
         const std::string &item = snapshot.front();
         auto e = json(event(item[0] == 'W' ? "WAYPOINT" : "NODE_UPDATE"));
+        cJSON_AddBoolToObject(e.get(), "snapshot", true);
         if (item[0] == 'N')
             cJSON_AddItemToObject(e.get(), "node", nodeDocument(strtoul(item.c_str() + 2, nullptr, 16)));
         else {
@@ -574,7 +623,8 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
     }
     if (type == "AUTH_GATEWAY_SUCCESS") {
         if (!authSent) return;
-        authenticated = true; displayError = nullptr; snapshotPending = true; lastHeartbeatMs = 0;
+        authenticated = true; displayError = nullptr; snapshotPending = true;
+        LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0;
         // The ACK provides server time even on devices without GPS/NTP.
         sendHeartbeat(); return;
     }
