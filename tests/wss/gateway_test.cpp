@@ -205,6 +205,9 @@ int main(int argc, char **argv) {
     };
     Canvas splash;
     mvtScreen::logo(&splash,0,0);
+    CHECK(mvtScreen::networkName("ShortSSID",0)=="ShortSSID");
+    CHECK(mvtScreen::networkName("Galaxy S21 Ultra 5G",0)=="Galaxy S21");
+    CHECK(mvtScreen::networkName("Galaxy S21 Ultra 5G",700)=="alaxy S21 ");
     if (argc > 3) {
         const char *names[] = {"online", "badkey", "stats", "long-room"};
         const char *lines[][3] = {{"R:ABC123","WIFI:OK","WSS:OK"},{"R:ABC123","WIFI:OK","WSS:BADKEY"},
@@ -213,6 +216,20 @@ int main(int argc, char **argv) {
             Canvas canvas;
             for(int row=0;row<3;++row) mvtScreen::row(&canvas,0,1+row*10,lines[i][row]);
             std::ofstream image(std::string(argv[3])+"/screen-"+names[i]+".pgm",std::ios::binary);
+            image << "P5\n64 32\n255\n"; image.write(reinterpret_cast<char *>(canvas.pixels),sizeof(canvas.pixels));
+        }
+        for (unsigned i=0;i<2;++i) {
+            Canvas canvas;
+            if (i==0) {
+                mvtScreen::row(&canvas,0,1,mvtScreen::networkName("Galaxy S21 Ultra 5G",0));
+                mvtScreen::row(&canvas,0,11,"IP:192.168");
+                mvtScreen::row(&canvas,0,21,"   .1.100");
+            } else {
+                mvtScreen::clockLogo(&canvas,2,1);
+                mvtScreen::row(&canvas,32,5,"20:35");
+                mvtScreen::row(&canvas,0,23,"13.10.2026");
+            }
+            std::ofstream image(std::string(argv[3])+(i==0?"/screen-network.pgm":"/screen-clock.pgm"),std::ios::binary);
             image << "P5\n64 32\n255\n"; image.write(reinterpret_cast<char *>(canvas.pixels),sizeof(canvas.pixels));
         }
     }

@@ -41,6 +41,7 @@ inline const uint8_t *glyph(char ch) {
     static const uint8_t blank[5] = {}, colon[5] = {0,0x36,0x36,0,0}, dash[5] = {8,8,8,8,8};
     static const uint8_t percent[5] = {0x63,0x13,8,0x64,0x63}, under[5] = {0x40,0x40,0x40,0x40,0x40};
     static const uint8_t question[5] = {2,1,0x51,9,6};
+    static const uint8_t dot[5] = {0,0x60,0x60,0,0};
     if (ch >= '0' && ch <= '9') return digits[ch-'0'];
     ch = char(toupper(static_cast<unsigned char>(ch)));
     if (ch >= 'A' && ch <= 'Z') return letters[ch-'A'];
@@ -48,6 +49,7 @@ inline const uint8_t *glyph(char ch) {
     if (ch == '-') return dash;
     if (ch == '%') return percent;
     if (ch == '_') return under;
+    if (ch == '.') return dot;
     return ch == ' ' ? blank : question;
 }
 inline std::string roomLine(const char *room, uint32_t tick) {
@@ -56,6 +58,20 @@ inline std::string roomLine(const char *room, uint32_t tick) {
     value += "   ";
     size_t start = tick / 700 % value.size();
     return "R:" + (value + value).substr(start, 8);
+}
+inline std::string networkName(const char *ssid, uint32_t tick) {
+    std::string value = ssid && ssid[0] ? ssid : "NO WIFI";
+    if (value.size() <= 10) return value;
+    value += "   ";
+    size_t start = tick / 700 % value.size();
+    return (value + value).substr(start, 10);
+}
+template<class Display> void clockLogo(Display *display, int x, int y) {
+    // Sample only the mountain mark from the portal raster, without the wordmark.
+    for (int py=0;py<14;++py) for (int px=0;px<24;++px) {
+        int sx=11+px*42/24, sy=py*24/14;
+        if (logoBits[sy*8+sx/8] & (1<<(sx%8))) display->setPixel(x+px,y+py);
+    }
 }
 inline std::string count(uint32_t value) {
     char b[8];

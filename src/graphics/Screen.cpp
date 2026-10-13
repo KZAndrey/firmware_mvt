@@ -67,6 +67,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #if HAS_MVT_WSS_GATEWAY
 #include "modules/MvtWssGateway.h"
 #include "graphics/MvtCompactScreen.h"
+#include <time.h>
 #endif
 
 using graphics::Emote;
@@ -123,6 +124,40 @@ static void drawMvtStats(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, 
     auto *radio = RadioLibInterface::instance;
     mvtScreen::row(display, x, y + 21, "R:" + mvtScreen::count(radio ? radio->rxGood : 0) +
                                       "T:" + mvtScreen::count(radio ? radio->txGood : 0));
+}
+static void drawMvtNetwork(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
+{
+    display->setColor(WHITE);
+    mvtScreen::row(display, x, y + 1, mvtScreen::networkName(config.network.wifi_ssid, millis()));
+    if (WiFi.status() != WL_CONNECTED) {
+        mvtScreen::row(display, x, y + 11, "NO WIFI");
+        mvtScreen::row(display, x, y + 21, "IP:--");
+        return;
+    }
+    auto ip = WiFi.localIP();
+    char upper[11], lower[11];
+    snprintf(upper, sizeof(upper), "IP:%u.%u", unsigned(ip[0]), unsigned(ip[1]));
+    snprintf(lower, sizeof(lower), "   .%u.%u", unsigned(ip[2]), unsigned(ip[3]));
+    mvtScreen::row(display, x, y + 11, upper);
+    mvtScreen::row(display, x, y + 21, lower);
+}
+static void drawMvtClock(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
+{
+    display->setColor(WHITE);
+    mvtScreen::clockLogo(display, x + 2, y + 1);
+    time_t local = getValidTime(RTCQualityDevice, true);
+    if (local < 1577836800) {
+        mvtScreen::row(display, x + 32, y + 5, "--:--");
+        mvtScreen::row(display, x, y + 23, "TIME:WAIT");
+        return;
+    }
+    struct tm date;
+    gmtime_r(&local, &date); // getValidTime(local=true) already applies the configured timezone.
+    char clock[6], day[11];
+    strftime(clock, sizeof(clock), "%H:%M", &date);
+    strftime(day, sizeof(day), "%d.%m.%Y", &date);
+    mvtScreen::row(display, x + 32, y + 5, clock);
+    mvtScreen::row(display, x, y + 23, day);
 }
 static void drawMvtFault(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
@@ -1037,6 +1072,9 @@ void Screen::setFrames(FrameFocus focus)
         normalFrames[numframes++] = drawMvtStatus;
         fsi.positions.system = numframes;
         normalFrames[numframes++] = drawMvtStats;
+        normalFrames[numframes++] = drawMvtNetwork;
+        fsi.positions.clock = numframes;
+        normalFrames[numframes++] = drawMvtClock;
         moduleFrames.clear();
         fsi.frameCount = numframes;
         this->frameCount = numframes;

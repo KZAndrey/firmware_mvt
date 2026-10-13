@@ -164,3 +164,11 @@ without invoking MQTT broker validation. This is necessary for the WSS address,
 Room ID and Relay Key to persist when MQTT itself is excluded. The stock client's
 MQTT connection-test button does not validate the direct WSS gateway; use the
 OLED authenticated `WSS:OK` status and the gateway's portal connection instead.
+
+The USER button cycles through four compact pages: room/WSS status,
+battery/known nodes/radio counters, Wi-Fi SSID and complete IPv4 address,
+then mountain mark with HH:MM and DD.MM.YYYY. Long SSIDs scroll. IPv4 is
+split after the second octet across two rows; all four octets are shown.
+Disconnected Wi-Fi shows NO WIFI / IP:--. The clock uses the device timezone
+and displays TIME:WAIT until a valid clock is available; room coordinates
+are not used to infer timezone.
