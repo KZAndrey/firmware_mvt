@@ -88,6 +88,23 @@ inline std::string memoryLine(const char *label, uint32_t bytes) {
     snprintf(value, sizeof(value), "%s:%luK", label, static_cast<unsigned long>(bytes / 1024));
     return value;
 }
+inline bool alternatePhase(uint64_t seconds) { return (seconds / 5) % 2 != 0; }
+inline std::string voltageLine(int millivolts) {
+    if (millivolts <= 0 || millivolts > 9999) return "VLT:--";
+    char value[11];
+    snprintf(value, sizeof(value), "VLT:%d.%02dV", millivolts / 1000, (millivolts % 1000) / 10);
+    return value;
+}
+inline std::string uptimeLine(uint64_t seconds) {
+    char value[24];
+    const auto days = seconds / 86400;
+    if (days)
+        snprintf(value, sizeof(value), "%lluD %02u:%02u", static_cast<unsigned long long>(days),
+                 unsigned(seconds / 3600 % 24), unsigned(seconds / 60 % 60));
+    else
+        snprintf(value, sizeof(value), "%02u:%02u", unsigned(seconds / 3600), unsigned(seconds / 60 % 60));
+    return value;
+}
 template<class Display> void clockLogo(Display *display, int x, int y) {
     // Sample only the mountain mark from the portal raster, without the wordmark.
     for (int py=0;py<14;++py) for (int px=0;px<24;++px) {

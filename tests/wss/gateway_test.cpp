@@ -302,6 +302,17 @@ int main(int argc, char **argv) {
     CHECK(mvtScreen::memoryLine("MIN", 112*1024+1023) == "MIN:112K");
     CHECK(mvtScreen::memoryLine("BLOCK", 0) == "BLOCK:0K");
     CHECK(mvtScreen::memoryLine("BLOCK", 512*1024).size() <= 10);
+    CHECK(!mvtScreen::alternatePhase(4));
+    CHECK(mvtScreen::alternatePhase(5));
+    CHECK(mvtScreen::alternatePhase(9));
+    CHECK(!mvtScreen::alternatePhase(10));
+    CHECK(mvtScreen::voltageLine(3929) == "VLT:3.92V");
+    CHECK(mvtScreen::voltageLine(-1) == "VLT:--");
+    CHECK(mvtScreen::voltageLine(0) == "VLT:--");
+    CHECK(mvtScreen::uptimeLine(0) == "00:00");
+    CHECK(mvtScreen::uptimeLine(86399) == "23:59");
+    CHECK(mvtScreen::uptimeLine(184440) == "2D 03:14");
+    CHECK(mvtScreen::uptimeLine(4294967) == "49D 17:02");
     if (argc > 3) {
         Canvas memoryCanvas;
         mvtScreen::row(&memoryCanvas,0,1,mvtScreen::memoryLine("FREE",168*1024));

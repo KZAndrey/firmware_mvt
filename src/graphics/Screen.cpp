@@ -69,6 +69,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "graphics/MvtCompactScreen.h"
 #include <time.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #endif
 
 using graphics::Emote;
@@ -114,7 +115,9 @@ static void drawMvtStats(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, 
     if (powerStatus && powerStatus->getHasBattery())
         snprintf(battery, sizeof(battery), "BAT:%u%%", unsigned(powerStatus->getBatteryChargePercent()));
     else snprintf(battery, sizeof(battery), "BAT:USB");
-    mvtScreen::row(display, x, y + 1, battery);
+    const bool voltage = mvtScreen::alternatePhase(esp_timer_get_time() / 1000000ULL);
+    mvtScreen::row(display, x, y + 1, voltage ?
+        mvtScreen::voltageLine(powerStatus && powerStatus->getHasBattery() ? powerStatus->getBatteryVoltageMv() : 0) : battery);
     unsigned count = 0;
     for (size_t i = 0; i < nodeDB->getNumMeshNodes(); ++i) {
         auto *n = nodeDB->getMeshNodeByIndex(i);
@@ -163,6 +166,13 @@ static void drawMvtMemory(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x,
 static void drawMvtClock(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
     display->setColor(WHITE);
+    // The 64-bit boot timer keeps uptime correct past the millis() rollover.
+    const uint64_t seconds = esp_timer_get_time() / 1000000ULL;
+    if (mvtScreen::alternatePhase(seconds)) {
+        mvtScreen::row(display, x, y + 5, "UPTIME");
+        mvtScreen::row(display, x, y + 23, mvtScreen::uptimeLine(seconds));
+        return;
+    }
     mvtScreen::clockLogo(display, x + 2, y + 1);
     time_t local = getValidTime(RTCQualityDevice, true);
     if (local < 1577836800) {

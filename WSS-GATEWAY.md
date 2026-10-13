@@ -165,9 +165,13 @@ Room ID and Relay Key to persist when MQTT itself is excluded. The stock client'
 MQTT connection-test button does not validate the direct WSS gateway; use the
 OLED authenticated `WSS:OK` status and the gateway's portal connection instead.
 
-The USER button cycles through four compact pages: room/WSS status,
+The USER button cycles through six compact pages: room/WSS status,
 battery/known nodes/radio counters, Wi-Fi SSID and complete IPv4 address,
-then mountain mark with HH:MM and DD.MM.YYYY. Long SSIDs scroll. IPv4 is
+radio preset/frequency/effective hops, internal RAM FREE/MIN/BLOCK,
+then mountain mark with HH:MM and DD.MM.YYYY. Every five seconds the clock
+alternates with UPTIME (days and HH:MM since boot); it works without clock sync
+and uses the 64-bit boot timer. The battery row alternates between BAT percent
+and VLT voltage; unavailable battery voltage shows VLT:--. Long SSIDs scroll. IPv4 is
 split after the second octet across two rows; all four octets are shown.
 Disconnected Wi-Fi shows NO WIFI / IP:--. The clock uses the device timezone
 and displays TIME:WAIT until a valid clock is available; room coordinates
