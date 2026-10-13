@@ -7,6 +7,7 @@
 #include "NodeDB.h"
 #include "PowerStatus.h"
 #include "Router.h"
+#include "RadioLibInterface.h"
 #include "RTC.h"
 #include "mesh/generated/meshtastic/telemetry.pb.h"
 #include <pb_decode.h>
@@ -197,10 +198,22 @@ void MvtWssGateway::publish(cJSON *p) {
 cJSON *MvtWssGateway::gatewayInfo() {
     uint32_t id = nodeDB->getNodeNum();
     cJSON *p = nodeDocument(id);
-    setString(p, "nodeName", owner.short_name);
+    setString(p, "nodeName", owner.long_name[0] ? owner.long_name : owner.short_name);
+    setString(p, "longName", owner.long_name);
+    setString(p, "shortName", owner.short_name);
+    setString(p, "gatewayType", "WSS");
+    auto *radio = RadioLibInterface::instance;
+    if (radio && radio->getFreq() > 0) {
+        char frequency[24]; snprintf(frequency, sizeof(frequency), "%.3f MHz", double(radio->getFreq()));
+        setString(p, "frequency", frequency);
+    }
+    char channel[48]; snprintf(channel, sizeof(channel), "%s (Ch %u)", channels.getName(channels.getPrimaryIndex()),
+                               unsigned(channels.getPrimaryIndex()));
+    setString(p, "channelName", channel);
     setString(p, "transport", "Direct WSS (WiFi)");
     setString(p, "firmwareVersion", xstr(APP_VERSION));
-    setBool(p, "radioConnected", config.lora.tx_enabled);
+    setBool(p, "radioConnected", radio && radio->getFreq() > 0);
+    setBool(p, "txEnabled", config.lora.tx_enabled);
     setNumber(p, "radioBattery", powerStatus ? powerStatus->getBatteryChargePercent() : 0);
     setNumber(p, "voltage", powerStatus ? powerStatus->getBatteryVoltageMv() / 1000.0 : 0);
     setNumber(p, "hopLimit", config.lora.hop_limit);
@@ -227,9 +240,10 @@ cJSON *MvtWssGateway::nodeDocument(uint32_t id, bool mv) {
     setString(p, "nodeKey", k.c_str()); setNumber(p, "nodeId", id); setString(p, "nodeHex", hex(id).c_str());
     auto *n = nodeDB->getMeshNode(id);
     if (n && !mv) {
-        setString(p, "callsign", n->has_user && n->user.short_name[0] ? n->user.short_name : hex(id).c_str());
-        if (n->has_user) setString(p, "longName", n->user.long_name);
-        if (n->has_position) {
+        if (n->has_user && n->user.short_name[0]) setString(p, "callsign", n->user.short_name);
+        if (n->has_user && n->user.long_name[0]) setString(p, "longName", n->user.long_name);
+        if (n->has_user && n->user.short_name[0]) setString(p, "shortName", n->user.short_name);
+        if (n->has_position && (n->position.latitude_i || n->position.longitude_i)) {
             setNumber(p, "lat", n->position.latitude_i / 1e7); setNumber(p, "lon", n->position.longitude_i / 1e7);
             setNumber(p, "alt", n->position.altitude);
         }
@@ -271,12 +285,15 @@ void MvtWssGateway::sendSnapshot() {
     // Send updates individually to avoid a large heap allocation and avoid
     // deleting portal nodes when the gateway's bounded cache is incomplete.
     if (snapshot.empty()) {
+    LOG_INFO("MVT snapshot NodeDB entries=%u", unsigned(nodeDB->getNumMeshNodes()));
     for (size_t i = 0; i < nodeDB->getNumMeshNodes(); ++i) {
         auto *n = nodeDB->getMeshNodeByIndex(i);
         if (n->num == nodeDB->getNodeNum() || n->is_ignored) continue;
         snapshot.push_back("N" + key(n->num));
     }
     for (const auto &n : nodes) {
+        if (n.first == key(nodeDB->getNodeNum())) continue;
+        if (n.first.find("_mv") == std::string::npos && nodeDB->getMeshNode(strtoul(n.first.c_str()+1, nullptr, 16))) continue;
         snapshot.push_back("C" + n.first);
     }
     for (const auto &w : waypoints) {
@@ -296,7 +313,8 @@ void MvtWssGateway::sendSnapshot() {
             cJSON_AddItemToObject(e.get(), item[0] == 'W' ? "waypoint" : "node", cJSON_Parse(found->second.c_str()));
         }
         cJSON *n = cJSON_GetObjectItemCaseSensitive(e.get(), "node");
-        if (n && number(n, "lastUpdateMs") < 1577836800000.0) setNumber(n, "lastUpdateMs", double(nowMs()));
+        // A NodeDB snapshot is historical, not evidence of a fresh RF reply.
+        if (n && !get(n, "lastUpdateMs")) setNumber(n, "lastUpdateMs", 0);
         if (sendDocument(e.get())) snapshot.pop_front();
     }
     snapshotPending = !snapshot.empty();
@@ -327,6 +345,11 @@ void MvtWssGateway::finishDiagnostic(const Pending &p, bool success, const mesht
     cJSON_AddNumberToObject(e, "targetNodeId", p.target); cJSON_AddStringToObject(e, "targetNodeHex", hex(p.target).c_str());
     cJSON_AddStringToObject(e, "nodeKey", p.nodeKey.c_str()); cJSON_AddBoolToObject(e, "isVirtual", p.isVirtual);
     cJSON_AddBoolToObject(e, "success", success);
+    if (p.kind == "ping") {
+        cJSON_AddBoolToObject(e, "positionReceived", p.positionReceived);
+        cJSON_AddBoolToObject(e, "telemetryReceived", p.telemetryReceived);
+        cJSON_AddBoolToObject(e, "nodeInfoReceived", p.nodeInfoReceived);
+    }
     if (success) cJSON_AddNumberToObject(e, "rttMs", uint32_t(millis() - p.started));
     if (mp) {
         cJSON_AddNumberToObject(e, "snr", mp->rx_snr);
@@ -348,7 +371,7 @@ void MvtWssGateway::finishDiagnostic(const Pending &p, bool success, const mesht
                     cJSON *h = cJSON_CreateObject(); cJSON_AddNumberToObject(h, "nodeId", ids[i]);
                     cJSON_AddStringToObject(h, "nodeHex", hex(ids[i]).c_str());
                     auto *n = nodeDB->getMeshNode(ids[i]);
-                    cJSON_AddStringToObject(h, "callsign", n && n->has_user ? n->user.short_name : hex(ids[i]).c_str());
+                    cJSON_AddStringToObject(h, "callsign", n && n->has_user ? (n->user.long_name[0] ? n->user.long_name : n->user.short_name) : hex(ids[i]).c_str());
                     if (i < snrCount && snr[i] != INT8_MIN) cJSON_AddNumberToObject(h, "snr", snr[i] / 4.0);
                     cJSON_AddItemToArray(a, h);
                 }
@@ -374,6 +397,34 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     mvt::Payload mv;
     bool hasMv = mp.decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
         mvt::decode(mp.decoded.payload.bytes, mp.decoded.payload.size, mv);
+    for (auto &poll : polls) {
+        if (from != poll.command.target) continue;
+        for (unsigned i = 0; i < poll.sent; ++i) {
+            const unsigned kind = poll.needsInfo ? i : i + 1;
+            bool correlated = request == poll.ids[i] && mp.to == nodeDB->getNodeNum();
+            if (poll.command.isVirtual && hasMv && !(mv.flags & (1 | 2 | 8))) correlated = true;
+            if (!correlated || (poll.replies & (1 << i))) continue;
+            bool valid = false;
+            if (kind == 0 && mp.decoded.portnum == meshtastic_PortNum_NODEINFO_APP) {
+                meshtastic_User user = meshtastic_User_init_default;
+                valid = decodeProto(mp, &meshtastic_User_msg, &user);
+                if (valid) poll.command.nodeInfoReceived = true;
+            } else if (kind == 1 && (mp.decoded.portnum == meshtastic_PortNum_POSITION_APP || hasMv)) {
+                meshtastic_Position pos = meshtastic_Position_init_default;
+                valid = hasMv || decodeProto(mp, &meshtastic_Position_msg, &pos);
+                if (valid) poll.command.positionReceived = true;
+            } else if (kind == 2 && hasTelemetry && telemetry.which_variant == meshtastic_Telemetry_device_metrics_tag) {
+                valid = true; poll.command.telemetryReceived = true;
+            }
+            if (valid) {
+                poll.replies |= 1 << i;
+                {
+                    // Report a genuine correlated response promptly; remaining requests still run.
+                    finishDiagnostic(poll.command, true, &mp, hasTelemetry ? &telemetry : nullptr);
+                }
+            }
+        }
+    }
     // Delivery proof must match request ID AND the intended peer, never a
     // relay's implicit ACK or our own local router acknowledgement.
     for (auto it = pending.begin(); it != pending.end();) {
@@ -471,8 +522,13 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     } else if (mp.decoded.portnum == meshtastic_PortNum_POSITION_APP) {
         meshtastic_Position p = meshtastic_Position_init_default;
         if (decodeProto(mp, &meshtastic_Position_msg, &p)) {
-            setNumber(n.get(), "lat", p.latitude_i / 1e7); setNumber(n.get(), "lon", p.longitude_i / 1e7);
-            setNumber(n.get(), "alt", p.altitude); publishNode(n.release());
+            const bool fix = p.has_latitude_i && p.has_longitude_i && (p.latitude_i || p.longitude_i);
+            setBool(n.get(), "gpsFix", fix);
+            if (fix) {
+                setNumber(n.get(), "lat", p.latitude_i / 1e7); setNumber(n.get(), "lon", p.longitude_i / 1e7);
+                setNumber(n.get(), "alt", p.altitude); setNumber(n.get(), "lastPositionMs", double(nowMs()));
+            }
+            publishNode(n.release());
         }
     } else if (hasTelemetry) {
         if (telemetry.which_variant == meshtastic_Telemetry_device_metrics_tag) deviceMetrics(n.get(), telemetry.variant.device_metrics);
@@ -485,7 +541,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
         meshtastic_User u = meshtastic_User_init_default;
         if (decodeProto(mp, &meshtastic_User_msg, &u)) {
             setString(n.get(), "callsign", u.short_name[0] ? u.short_name : hex(from).c_str());
-            setString(n.get(), "longName", u.long_name); publishNode(n.release());
+            setString(n.get(), "longName", u.long_name); setString(n.get(), "shortName", u.short_name); publishNode(n.release());
         }
     } else if (mp.decoded.portnum == meshtastic_PortNum_WAYPOINT_APP) {
         meshtastic_Waypoint w = meshtastic_Waypoint_init_default;
@@ -599,7 +655,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         std::string nodeKey = str(j.get(), "nodeKey", key(target, mv).c_str());
         std::string kind = type == "CMD_TRACEROUTE" ? "trace" : type == "CMD_POLL_ENV" ? "env" : "ping";
         const size_t active = std::count_if(pending.begin(), pending.end(), [](const Pending &p) { return p.kind != "latechat"; });
-        if (active >= MAX_PENDING || std::any_of(pending.begin(), pending.end(), [target](const Pending &p) {
+        if (active + polls.size() >= MAX_PENDING || std::any_of(polls.begin(), polls.end(), [target](const Poll &p) { return p.command.target == target; }) || std::any_of(pending.begin(), pending.end(), [target](const Pending &p) {
             return p.target == target && p.kind != "chat" && p.kind != "latechat";
         })) {
             auto e = event("COMMAND_THROTTLED"); cJSON_AddNumberToObject(e, "targetNodeId", target);
@@ -611,6 +667,21 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
             cJSON_AddBoolToObject(e, "success", true); cJSON_AddNumberToObject(e, "rttMs", 0);
             cJSON_AddNumberToObject(e, "hops", 0); cJSON_AddNumberToObject(e, "batteryPct", powerStatus ? powerStatus->getBatteryChargePercent() : 0);
             publish(e); sendHeartbeat(); return;
+        }
+        if (kind == "ping") {
+            auto *known = nodeDB->getMeshNode(target);
+            Poll poll;
+            poll.command = {0, target, millis(), "ping", nodeKey, mv};
+            poll.needsInfo = !mv && (!known || !known->has_user ||
+                (!known->user.long_name[0] && !known->user.short_name[0]));
+            poll.count = mv ? 1 : poll.needsInfo ? 3 : 2;
+            uint32_t base = config.lora.modem_preset == meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW ? 5500 :
+                config.lora.modem_preset == meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW ? 3000 :
+                config.lora.modem_preset == meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST ? 600 : 500;
+            unsigned hops = known && known->has_hops_away ? std::max(1U, unsigned(known->hops_away)) : config.lora.hop_limit;
+            poll.spacing = std::min(25000U, std::max(3000U, base * std::min(hops, 6U) * 2 + 1500));
+            poll.nextAt = millis(); polls.push_back(poll); advancePolls();
+            return;
         }
         auto *p = packet(target);
         Pending q = {p ? p->id : 0, target, millis(), kind, nodeKey, mv};
@@ -632,11 +703,47 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if (!transmit(p)) { pending.pop_back(); finishDiagnostic(q, false); }
     }
 }
+void MvtWssGateway::advancePolls() {
+    for (auto it = polls.begin(); it != polls.end();) {
+        if (uint32_t(millis() - it->command.started) >= ACK_TIMEOUT) {
+            if (!it->command.positionReceived && !it->command.telemetryReceived && !it->command.nodeInfoReceived)
+                finishDiagnostic(it->command, false);
+            it = polls.erase(it); continue;
+        }
+        if (it->sent == it->count && it->replies == (1U << it->count) - 1) {
+            it = polls.erase(it); continue;
+        }
+        if (moduleConfig.mqtt.enabled && !authBlocked && !inputFault && authenticated && socketConnected && nowMs() && it->sent < it->count && int32_t(millis() - it->nextAt) >= 0) {
+            const unsigned step = it->needsInfo ? it->sent : it->sent + 1;
+            auto *p = packet(it->command.target);
+            if (!p) { finishDiagnostic(it->command, it->replies != 0); it = polls.erase(it); continue; }
+            p->decoded.want_response = true;
+            if (step == 0) {
+                p->decoded.portnum = meshtastic_PortNum_NODEINFO_APP;
+                p->decoded.payload.size = pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_User_msg, &owner);
+            }
+            else if (step == 1) p->decoded.portnum = meshtastic_PortNum_POSITION_APP;
+            else {
+                meshtastic_Telemetry t = meshtastic_Telemetry_init_default;
+                t.which_variant = meshtastic_Telemetry_device_metrics_tag;
+                t.time = uint32_t(nowMs()/1000);
+                p->decoded.portnum = meshtastic_PortNum_TELEMETRY_APP;
+                p->decoded.payload.size = pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
+            }
+            uint32_t id = p->id;
+            if (!transmit(p)) { finishDiagnostic(it->command, it->replies != 0); it = polls.erase(it); continue; }
+            LOG_INFO("MVT poll target=%08x port=%u id=%u", it->command.target, unsigned(step == 0 ? 4 : step == 1 ? 3 : 67), id);
+            it->ids[it->sent++] = id;
+            it->nextAt = millis() + it->spacing;
+        }
+        ++it;
+    }
+}
 int32_t MvtWssGateway::runOnce() {
     std::string room = moduleConfig.mqtt.username, secret = moduleConfig.mqtt.password, addr = moduleConfig.mqtt.address;
     if (room != configuredRoom || secret != configuredKey || addr != configuredAddress) {
         disconnectWs(); authBlocked = false; displayError = nullptr;
-        outgoing.clear(); pending.clear(); completedCommands.clear();
+        outgoing.clear(); pending.clear(); polls.clear(); completedCommands.clear();
         configuredRoom = room; configuredKey = secret; configuredAddress = addr;
     }
     for (auto it = pending.begin(); it != pending.end();) {
@@ -662,6 +769,7 @@ int32_t MvtWssGateway::runOnce() {
     for (int i = 0; i < 8 && incoming && xQueueReceive(incoming, &text, 0) == pdTRUE; ++i) {
         handleIncomingCommand(text); free(text);
     }
+    advancePolls();
     if (peerRejected) { authBlocked = true; if (!displayError) displayError = "BLOCK"; peerRejected = false; }
     if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked || inputFault) {
         if (wsClient) disconnectWs();
@@ -681,6 +789,7 @@ int32_t MvtWssGateway::runOnce() {
     if (uint32_t(millis() - lastHeartbeatMs) >= 15000) sendHeartbeat();
     // Wait for a clock before replaying events; never send uptime as Unix time.
     if (!nowMs()) return 100;
+    advancePolls();
     if (snapshotPending) sendSnapshot();
     for (int i = 0; i < 4 && !outgoing.empty(); ++i) {
         auto p = json(cJSON_Parse(outgoing.front().c_str()));

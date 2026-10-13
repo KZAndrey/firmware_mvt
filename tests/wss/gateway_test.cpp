@@ -7,6 +7,9 @@
 #include <sstream>
 #include "NodeDB.h"
 #include "Router.h"
+#include "RadioLibInterface.h"
+RadioLibInterface testRadioInfo;
+RadioLibInterface *RadioLibInterface::instance = &testRadioInfo;
 #include "PowerStatus.h"
 #include "WiFi.h"
 #include "esp_websocket_client.h"
@@ -76,9 +79,9 @@ void command(MvtWssGateway &g, const char *text) { g.handleIncomingCommand(text)
 int main(int argc, char **argv) {
     config.lora.tx_enabled = true; config.lora.hop_limit = 4; moduleConfig.mqtt.enabled = true;
     strcpy(moduleConfig.mqtt.username, "ROOM1"); strcpy(moduleConfig.mqtt.password, "relay-secret");
-    strcpy(owner.short_name, "MVT");
+    strcpy(owner.short_name, "MVT"); strcpy(owner.long_name, "Movetain Host");
     meshtastic_NodeInfoLite peer = {}; peer.num = 0xaabbccdd; peer.channel = 2;
-    peer.has_user = true; strcpy(peer.user.short_name, "A"); db.nodes.push_back(peer);
+    peer.last_heard = 1700000000; peer.has_user = true; strcpy(peer.user.short_name, "A"); db.nodes.push_back(peer);
     MvtWssGateway g;
     g.runOnce(); CHECK(g.wsClient != nullptr); CHECK(!g.authenticated);
     g.socketConnected = true; g.runOnce(); CHECK(g.authSent);
@@ -87,6 +90,26 @@ int main(int argc, char **argv) {
     frame(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}", 5); g.runOnce(); CHECK(g.authenticated);
     frame(g, "{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1791892800000}"); g.runOnce();
     CHECK(g.nowMs() == 1791892800000ULL); flush(g);
+    auto initialNode = lastEvent(g, "NODE_UPDATE");
+    CHECK(nget(cJSON_GetObjectItem(initialNode.get(), "node"), "lastUpdateMs") == 1700000000000ULL);
+    auto gateway = Json(g.gatewayInfo(), cJSON_Delete);
+    CHECK(std::string(sget(gateway.get(), "nodeName")) == "Movetain Host");
+    CHECK(std::string(sget(gateway.get(), "shortName")) == "MVT");
+    CHECK(std::string(sget(gateway.get(), "frequency")) == "433.175 MHz");
+    meshtastic_NodeInfoLite unknown = {}; unknown.num = 0x55555555;
+    meshtastic_NodeInfoLite ignored = {}; ignored.num = 0x66666666; ignored.is_ignored = true;
+    meshtastic_NodeInfoLite own = {}; own.num = db.getNodeNum();
+    db.nodes.push_back(unknown); db.nodes.push_back(ignored); db.nodes.push_back(own);
+    const size_t snapshotStart = testSent.size(); g.snapshotPending = true; flush(g);
+    unsigned snapshotNodes = 0;
+    for (size_t i = snapshotStart; i < testSent.size(); ++i) {
+        auto item = parse(testSent[i]);
+        if (std::string(sget(item.get(), "type")) != "NODE_UPDATE") continue;
+        ++snapshotNodes; auto *data = cJSON_GetObjectItem(item.get(), "node");
+        CHECK(nget(data,"nodeId") != ignored.num && nget(data,"nodeId") != own.num);
+        if (nget(data,"nodeId") == unknown.num) CHECK(nget(data,"lastUpdateMs") == 0);
+    }
+    CHECK(snapshotNodes == 2);
     // JSON escaping, signed Android node ID, exact ID and channel, binary MV.
     command(g, u8"{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":42,\"recipientId\":-1430532899,\"senderCallsign\":\"HQ\",\"text\":\"Привет \\\"А\\\"\\nстрока\",\"isSos\":true}");
     CHECK(radio.sent.size() == 1); auto sent = radio.sent.back();
@@ -119,16 +142,47 @@ int main(int argc, char **argv) {
     command(g, "{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"recipientId\":2864434397,\"waypoint\":{\"title\":\"Target\",\"comment\":\"точка\",\"latitude\":43.2,\"longitude\":76.8,\"altitude\":1234,\"isTarget\":true}}");
     CHECK(radio.sent.back().to == 0xaabbccdd); CHECK(mvt::decode(radio.sent.back().decoded.payload.bytes, radio.sent.back().decoded.payload.size, payload));
     CHECK(payload.icon == 5 && payload.altitude == 1234 && payload.name == "Target");
-    // Correlated diagnostics: unrelated fresh telemetry is never a ping proof.
+    // Known node: position and telemetry, independently correlated and paced.
     command(g, "{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
-    CHECK(sent.decoded.want_response && sent.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP);
+    CHECK(sent.decoded.want_response && sent.decoded.portnum == meshtastic_PortNum_POSITION_APP);
+    const uint32_t positionId = sent.id;
+    const size_t beforeThrottle = radio.sent.size();
+    command(g, "{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}");
+    CHECK(radio.sent.size() == beforeThrottle);
+    testMillis += g.polls.front().spacing; g.runOnce(); sent = radio.sent.back();
+    CHECK(sent.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP && sent.id != positionId);
     meshtastic_Telemetry t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_device_metrics_tag;
     t.variant.device_metrics.has_battery_level = true; t.variant.device_metrics.battery_level = 66;
-    auto p = incoming(0xaabbccdd, sent.id + 1, meshtastic_PortNum_TELEMETRY_APP);
+    auto p = incoming(0xaabbccdd, sent.id + 50, meshtastic_PortNum_TELEMETRY_APP);
     p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
-    g.handleReceived(p); CHECK(g.pending.size() == 1);
-    p.decoded.request_id = sent.id; p.id++; g.handleReceived(p); CHECK(g.pending.empty());
+    g.handleReceived(p); CHECK(!g.polls.front().command.telemetryReceived);
+    p.decoded.request_id = sent.id; p.id = radio.nextId++; g.handleReceived(p);
+    CHECK(g.polls.front().command.telemetryReceived && !g.polls.front().command.positionReceived);
     auto result = lastEvent(g, "PING_RESULT"); CHECK(nget(result.get(), "batteryPct") == 66 && nget(result.get(), "hops") == 2);
+    // A delayed position reply remains valid after telemetry has already arrived.
+    meshtastic_Position position = meshtastic_Position_init_default;
+    position.has_latitude_i = true; position.has_longitude_i = true;
+    position.latitude_i = 499400000; position.longitude_i = 826100000;
+    p = incoming(0xaabbccdd, positionId, meshtastic_PortNum_POSITION_APP);
+    p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Position_msg, &position);
+    g.handleReceived(p); g.runOnce(); CHECK(g.polls.empty());
+    auto node = lastEvent(g, "NODE_UPDATE");
+    CHECK(nget(cJSON_GetObjectItem(node.get(), "node"), "lat") == 49.94);
+    // Empty GPS reply does not delete the last known location.
+    p = incoming(0xaabbccdd, 0, meshtastic_PortNum_POSITION_APP);
+    position = meshtastic_Position_init_default;
+    p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Position_msg, &position);
+    g.handleReceived(p); node = lastEvent(g, "NODE_UPDATE");
+    CHECK(nget(cJSON_GetObjectItem(node.get(), "node"), "lat") == 49.94);
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItem(cJSON_GetObjectItem(node.get(), "node"), "gpsFix")));
+    // Unknown node gets three requests with independent IDs.
+    command(g, "{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":1234567}");
+    CHECK(radio.sent.back().decoded.portnum == meshtastic_PortNum_NODEINFO_APP);
+    testMillis += g.polls.front().spacing; g.runOnce();
+    CHECK(radio.sent.back().decoded.portnum == meshtastic_PortNum_POSITION_APP);
+    testMillis += g.polls.front().spacing; g.runOnce();
+    CHECK(radio.sent.back().decoded.portnum == meshtastic_PortNum_TELEMETRY_APP);
+    testMillis += 120001; g.runOnce(); CHECK(g.polls.empty());
     command(g, "{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
     t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_environment_metrics_tag;
     t.variant.environment_metrics.has_temperature = true; t.variant.environment_metrics.temperature = -12.5;

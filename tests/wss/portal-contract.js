@@ -12,7 +12,7 @@ for (const e of rows) {
   assert(allowed.includes(e.type),`unsupported event ${e.type}`);
   if (e.type === 'NODE_UPDATE') {
     assert.match(e.node.nodeKey,/^![0-9a-f]{8}(_mv)?$/);
-    assert(e.node.callsign); assert(e.node.lastUpdateMs >= 1577836800000);
+    assert(e.node.callsign); assert(e.node.lastUpdateMs === 0 || e.node.lastUpdateMs >= 1577836800000);
   }
   if (e.type === 'CHAT_STATUS_UPDATE') {
     assert(['SENT','AWAITING_ACK','DELIVERED','FAILED','UNCONFIRMED'].includes(e.status));

@@ -25,10 +25,22 @@ protected:
     int32_t runOnce() override;
 private:
     struct Pending {
+        Pending() = default;
+        Pending(uint32_t packet, uint32_t node, uint32_t tick, const std::string &type,
+                const std::string &key, bool mv) : id(packet), target(node), started(tick), kind(type), nodeKey(key), isVirtual(mv) {}
         uint32_t id, target, started;
         std::string kind, nodeKey;
         bool isVirtual;
+        bool positionReceived = false, telemetryReceived = false, nodeInfoReceived = false;
     };
+    struct Poll {
+        Pending command;
+        uint32_t ids[3] = {}, nextAt = 0, spacing = 3000;
+        uint8_t count = 0, sent = 0, replies = 0;
+        bool needsInfo = false;
+    };
+    std::deque<Poll> polls;
+    void advancePolls();
     esp_websocket_client_handle_t wsClient = nullptr;
     QueueHandle_t incoming = nullptr;
     volatile bool socketConnected = false, inputFault = false, peerRejected = false;

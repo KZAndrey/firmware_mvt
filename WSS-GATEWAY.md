@@ -172,3 +172,22 @@ split after the second octet across two rows; all four octets are shown.
 Disconnected Wi-Fi shows NO WIFI / IP:--. The clock uses the device timezone
 and displays TIME:WAIT until a valid clock is available; room coordinates
 are not used to infer timezone.
+
+## Gateway parity and radio polling
+
+Gateway metadata includes `longName`, `shortName`, `gatewayType=WSS`, real
+`frequency` from RadioInterface::getFreq(), primary channel name/index and TX
+state. The board still uses Meshtastic 2.7.15 and the existing ESP32 SDK.
+
+Native ping queues NodeInfo only when the name is unknown, then Position and
+DeviceMetrics. Independent packet IDs, peer/destination checks and preset/hop
+based spacing keep late replies valid for 120 seconds. Replies update the node
+independently; `positionReceived`, `telemetryReceived` and `nodeInfoReceived`
+report what actually answered. A virtual node uses a position query for its MV
+beacon. A battery/NodeInfo response is not GPS confirmation. Empty Position
+responses set gpsFix=false without deleting the last known coordinates.
+
+The initial/reconnect snapshot sends every non-ignored NodeDB peer, including
+peers without coordinates, and excludes the gateway's HOST entry. Native cache
+duplicates are skipped. Original last_heard is retained; unknown time stays 0.
+Snapshot dispatch and individual ping packet IDs/ports are logged without keys.

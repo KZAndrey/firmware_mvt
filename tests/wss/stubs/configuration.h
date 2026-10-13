@@ -32,5 +32,5 @@ inline size_t pb_encode_to_bytes(uint8_t *dest, size_t capacity, const pb_msgdes
 }
 struct Pool { void release(meshtastic_MeshPacket *p) { delete p; } };
 extern Pool packetPool;
-struct Channels { uint8_t getPrimaryIndex() const { return 0; } };
+struct Channels { uint8_t getPrimaryIndex() const { return 0; } const char *getName(size_t) const { return "LongFast"; } };
 extern Channels channels;
