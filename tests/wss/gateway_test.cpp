@@ -222,6 +222,22 @@ int main(int argc, char **argv) {
         auto *msg = cJSON_GetObjectItemCaseSensitive(e.get(), "message");
         if (msg) CHECK(!cJSON_GetObjectItemCaseSensitive(msg, "waypoint"));
     }
+    // Actual MV radio packets: sender identity is not the waypoint title.
+    p.from = 0xddee1122;
+    payload.flags = 1; payload.name = "Field Sender"; payload.comment = "Fast Location"; p.id++;
+    p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes)); g.handleReceived(p); flush(g);
+    result = lastEvent(g, "WAYPOINT"); auto *wp = cJSON_GetObjectItem(result.get(), "waypoint");
+    CHECK(std::string(sget(wp, "title")) == "Fast Location"); CHECK(nget(wp, "latitude") == 43.25);
+    // SOS coordinates form a point even when the waypoint flag is absent.
+    payload.flags = 4; payload.comment = "SOS"; p.id++;
+    p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes)); g.handleReceived(p); flush(g);
+    result = lastEvent(g, "WAYPOINT"); wp = cJSON_GetObjectItem(result.get(), "waypoint");
+    CHECK(std::string(sget(wp, "title")) == "SOS Emergency"); CHECK(cJSON_IsTrue(cJSON_GetObjectItem(wp, "isSos")));
+    result = lastEvent(g, "CHAT_MESSAGE");
+    CHECK(cJSON_GetObjectItem(cJSON_GetObjectItem(result.get(), "message"), "waypoint") != nullptr);
+    CHECK(g.waypoints.size() == 2);
+    command(g, "{\"type\":\"WAYPOINT_DELETED\",\"latitude\":43.25,\"longitude\":76.9,\"title\":\"Fast Location\"}");
+    CHECK(g.waypoints.size() == 1); CHECK(g.waypoints.begin()->second.find("SOS Emergency") != std::string::npos);
     // Packet fragments assemble before dispatch; control frames do not pollute JSON.
     std::string padded = "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":99,\"text\":\"chunked\",\"padding\":\"" + std::string(5000, 'a') + "\"}";
     count = radio.sent.size(); frame(g, padded, 111); CHECK(radio.sent.size() == count); g.runOnce(); CHECK(radio.sent.size() == count + 1);

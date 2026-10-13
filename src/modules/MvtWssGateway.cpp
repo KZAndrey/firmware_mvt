@@ -28,6 +28,14 @@ bool jsonBool(const cJSON *p, const char *key) { return cJSON_IsTrue(get(p, key)
 double number(const cJSON *p, const char *key, double fallback = 0) {
     const cJSON *v = get(p, key); return cJSON_IsNumber(v) && std::isfinite(v->valuedouble) ? v->valuedouble : fallback;
 }
+bool selectedWaypoint(const cJSON *wp, const cJSON *selection) {
+    if (!(fabs(number(wp, "latitude", NAN) - number(selection, "latitude", NAN)) < 0.00005 &&
+          fabs(number(wp, "longitude", NAN) - number(selection, "longitude", NAN)) < 0.00005)) return false;
+    const std::string title = str(selection, "title");
+    if (!title.empty() && title != str(wp, "title")) return false;
+    double selectedTime = number(selection, "timestampSec"), storedTime = number(wp, "timestampSec");
+    return !selectedTime || !storedTime || selectedTime == storedTime;
+}
 // Also accept Android's signed representation of uint32 node/packet IDs.
 bool identifier(const cJSON *p, const char *key, uint32_t &out, uint32_t fallback = 0) {
     const cJSON *v = get(p, key);
@@ -324,7 +332,7 @@ void MvtWssGateway::publishNode(cJSON *p) {
 }
 void MvtWssGateway::publishWaypoint(cJSON *p) {
     auto owned = json(p);
-    std::string id = std::to_string(number(p, "latitude")) + ":" + std::to_string(number(p, "longitude")) + ":" + str(p, "title");
+    std::string id = std::to_string(number(p, "latitude")) + ":" + std::to_string(number(p, "longitude")) + ":" + str(p, "title") + ":" + std::to_string(number(p, "timestampSec"));
     if (waypoints.size() >= 64) waypoints.erase(waypoints.begin());
     waypoints[id] = serialize(p);
     auto e = event("WAYPOINT"); cJSON_AddItemToObject(e, "waypoint", owned.release()); publish(e);
@@ -549,12 +557,17 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
             cJSON_AddNumberToObject(msg, "timestampMs", double(nowMs()));
             cJSON_AddBoolToObject(msg, "isSos", mv.flags & 4); cJSON_AddNumberToObject(msg, "hops", hops);
             cJSON_AddStringToObject(msg, "status", "RECEIVED");
-            if (mv.flags & 1) {
+            if ((mv.flags & (1 | 4)) && (mv.lat != 0 || mv.lon != 0)) {
                 auto wp = cJSON_CreateObject();
-                cJSON_AddStringToObject(wp, "title", mv.name.c_str()); cJSON_AddStringToObject(wp, "comment", mv.comment.c_str());
+                const bool sos = mv.flags & 4;
+                const std::string title = !mv.comment.empty() && !(sos && (mv.comment == "SOS" || mv.comment == u8"СОС"))
+                    ? mv.comment : sos ? "SOS Emergency" : mv.icon == 5 ? "Target Point" : "Waypoint";
+                cJSON_AddStringToObject(wp, "title", title.c_str());
+                cJSON_AddStringToObject(wp, "comment", ("From " + mv.name).c_str());
                 cJSON_AddNumberToObject(wp, "latitude", mv.lat); cJSON_AddNumberToObject(wp, "longitude", mv.lon);
                 cJSON_AddNumberToObject(wp, "altitude", mv.altitude); cJSON_AddNumberToObject(wp, "timestampSec", double(nowMs() / 1000));
                 cJSON_AddBoolToObject(wp, "isRadio", true); cJSON_AddBoolToObject(wp, "isTarget", mv.icon == 5);
+                cJSON_AddBoolToObject(wp, "isSos", sos);
                 publishWaypoint(cJSON_Duplicate(wp, true)); cJSON_AddItemToObject(msg, "waypoint", wp);
             }
             auto e = event("CHAT_MESSAGE"); cJSON_AddItemToObject(e, "message", msg); publish(e);
@@ -638,11 +651,11 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
     if (!authenticated || authBlocked) return;
     if (type == "CMD_REFRESH_GATEWAY") { sendHeartbeat(); snapshotPending = true; return; }
     if (type == "WAYPOINT_DELETED" || type == "CMD_DELETE_WAYPOINT") {
-        double lat = number(j.get(), "latitude", NAN), lon = number(j.get(), "longitude", NAN);
         for (auto it = waypoints.begin(); it != waypoints.end();) {
             auto wp = json(cJSON_Parse(it->second.c_str()));
-            if (fabs(number(wp.get(), "latitude", NAN) - lat) < 0.00005 && fabs(number(wp.get(), "longitude", NAN) - lon) < 0.00005)
-                it = waypoints.erase(it);
+            if (selectedWaypoint(wp.get(), j.get())) {
+                waypoints.erase(it); break;
+            }
             else ++it;
         }
         // Remove unsent/replay attachments as well, otherwise an offline
@@ -651,7 +664,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
             auto e = json(cJSON_Parse(it->c_str()));
             cJSON *chat = cJSON_GetObjectItemCaseSensitive(e.get(), "message");
             cJSON *wp = cJSON_GetObjectItemCaseSensitive(chat ? chat : e.get(), "waypoint");
-            if (wp && fabs(number(wp, "latitude", NAN) - lat) < 0.00005 && fabs(number(wp, "longitude", NAN) - lon) < 0.00005) {
+            if (wp && selectedWaypoint(wp, j.get())) {
                 if (!chat) { it = outgoing.erase(it); continue; }
                 cJSON_DeleteItemFromObjectCaseSensitive(chat, "waypoint"); *it = serialize(e.get());
             }

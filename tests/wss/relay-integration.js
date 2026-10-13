@@ -58,6 +58,18 @@ async function connect(url) {
     assert.equal(room.state.participants.get(nativeKey).lat,49.95);
     assert.equal(room.state.participants.get(nativeKey).longName,'Field station');
     assert.equal(room.state.participants.get(nativeKey).lastUpdateMs,liveTime);
+    // These attachments were emitted by the production C++ handler from MV bytes.
+    await until(()=>room.state.waypoints.some(w=>w.title==='SOS Emergency'));
+    const fastPoint=room.state.waypoints.find(w=>w.title==='Fast Location');
+    const sosPoint=room.state.waypoints.find(w=>w.title==='SOS Emergency');
+    assert(fastPoint); assert.equal(sosPoint.isSos,true);
+    assert.equal(fastPoint.latitude,sosPoint.latitude);
+    assert.equal(fastPoint.longitude,sosPoint.longitude);
+    assert(coord.messages.some(e=>e.type==='WAYPOINT'&&e.waypoint.title==='Fast Location'));
+    coord.send({type:'CMD_DELETE_WAYPOINT',...fastPoint});
+    await until(()=>!room.state.waypoints.some(w=>w.title==='Fast Location'));
+    assert(room.state.waypoints.some(w=>w.title==='SOS Emergency'));
+    assert(room.state.messages.some(m=>m.waypoint?.title==='SOS Emergency'));
     const gatewayMeta=api.gatewayStatus(room).gatewayInfo;
     assert.equal(gatewayMeta.gatewayType,'WSS');
     assert.equal(gatewayMeta.longName,'Movetain Host');
