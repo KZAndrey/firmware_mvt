@@ -1,4 +1,5 @@
 .pio
+.tools/
 pio
 pio.tar
 web

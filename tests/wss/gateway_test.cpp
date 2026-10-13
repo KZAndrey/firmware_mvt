@@ -1,0 +1,192 @@
+// Compile the production gateway with deterministic radio/socket adapters.
+#include "configuration.h"
+#include <memory>
+#include <map>
+#include <cassert>
+#include <fstream>
+#include <sstream>
+#include "NodeDB.h"
+#include "Router.h"
+#include "PowerStatus.h"
+#include "WiFi.h"
+#include "esp_websocket_client.h"
+#include "concurrency/OSThread.h"
+#include <cJSON.h>
+#define private public
+#define protected public
+#include "modules/MvtWssGateway.h"
+#undef protected
+#undef private
+#include "modules/MvtPayload.h"
+uint32_t testMillis = 20000;
+meshtastic_LocalConfig config = meshtastic_LocalConfig_init_default;
+meshtastic_LocalModuleConfig moduleConfig = meshtastic_LocalModuleConfig_init_default;
+meshtastic_User owner = meshtastic_User_init_default;
+Pool packetPool;
+Channels channels;
+NodeDB db;
+NodeDB *nodeDB = &db;
+Router radio;
+Router *router = &radio;
+PowerStatus power;
+PowerStatus *powerStatus = &power;
+TestWiFi WiFi;
+std::vector<std::string> testSent;
+bool testSendFailure = false;
+// Flash NodeDB serialization is outside this host adapter; wire protobufs
+// still use the actual generated 2.7.15 descriptors and nanopb implementation.
+bool meshtastic_NodeDatabase_callback(pb_istream_t *, pb_ostream_t *, const pb_field_t *) { return false; }
+int checks = 0;
+#define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while(0)
+using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
+Json parse(const std::string &s) { return Json(cJSON_Parse(s.c_str()), cJSON_Delete); }
+const char *sget(cJSON *j, const char *key) { auto *v = cJSON_GetObjectItemCaseSensitive(j, key); return cJSON_IsString(v) ? v->valuestring : ""; }
+double nget(cJSON *j, const char *key) { auto *v = cJSON_GetObjectItemCaseSensitive(j, key); return cJSON_IsNumber(v) ? v->valuedouble : 0; }
+void frame(MvtWssGateway &g, const std::string &s, size_t chunk = 2048) {
+    for (size_t off = 0; off < s.size(); off += chunk) {
+        esp_websocket_event_data_t d = {s.data() + off, int(std::min(chunk, s.size() - off)), 1, nullptr, nullptr, int(s.size()), int(off)};
+        g.receiveFrame(d);
+    }
+}
+void flush(MvtWssGateway &g) {
+    for (int i = 0; i < 100 && (!g.outgoing.empty() || g.snapshotPending); ++i) g.runOnce();
+}
+Json lastEvent(MvtWssGateway &g, const char *type) {
+    flush(g);
+    for (auto it = testSent.rbegin(); it != testSent.rend(); ++it) {
+        auto j = parse(*it); if (strcmp(sget(j.get(), "type"), type) == 0) return j;
+    }
+    return Json(nullptr, cJSON_Delete);
+}
+meshtastic_MeshPacket incoming(uint32_t from, uint32_t req, meshtastic_PortNum port) {
+    meshtastic_MeshPacket p = meshtastic_MeshPacket_init_default;
+    p.which_payload_variant = meshtastic_MeshPacket_decoded_tag;
+    p.from = from; p.to = db.getNodeNum(); p.id = radio.nextId++; p.decoded.request_id = req;
+    p.decoded.portnum = port; p.hop_start = 3; p.hop_limit = 1; p.rx_snr = 6.25; return p;
+}
+void ack(MvtWssGateway &g, uint32_t from, uint32_t id, int reason = 0, uint32_t to = 0x11223344) {
+    auto p = incoming(from, id, meshtastic_PortNum_ROUTING_APP); p.to = to;
+    meshtastic_Routing r = meshtastic_Routing_init_default;
+    r.which_variant = meshtastic_Routing_error_reason_tag; r.error_reason = meshtastic_Routing_Error(reason);
+    p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Routing_msg, &r);
+    g.handleReceived(p);
+}
+void command(MvtWssGateway &g, const char *text) { g.handleIncomingCommand(text); }
+int main(int argc, char **argv) {
+    config.lora.tx_enabled = true; config.lora.hop_limit = 4; moduleConfig.mqtt.enabled = true;
+    strcpy(moduleConfig.mqtt.username, "ROOM1"); strcpy(moduleConfig.mqtt.password, "relay-secret");
+    strcpy(owner.short_name, "MVT");
+    meshtastic_NodeInfoLite peer = {}; peer.num = 0xaabbccdd; peer.channel = 2;
+    peer.has_user = true; strcpy(peer.user.short_name, "A"); db.nodes.push_back(peer);
+    MvtWssGateway g;
+    g.runOnce(); CHECK(g.wsClient != nullptr); CHECK(!g.authenticated);
+    g.socketConnected = true; g.runOnce(); CHECK(g.authSent);
+    CHECK(std::string(sget(parse(testSent.back()).get(), "type")) == "AUTH_GATEWAY");
+    command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":42,\"text\":\"blocked\"}"); CHECK(radio.sent.empty());
+    frame(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}", 5); g.runOnce(); CHECK(g.authenticated);
+    frame(g, "{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1791892800000}"); g.runOnce();
+    CHECK(g.nowMs() == 1791892800000ULL); flush(g);
+    // JSON escaping, signed Android node ID, exact ID and channel, binary MV.
+    command(g, u8"{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":42,\"recipientId\":-1430532899,\"senderCallsign\":\"HQ\",\"text\":\"Привет \\\"А\\\"\\nстрока\",\"isSos\":true}");
+    CHECK(radio.sent.size() == 1); auto sent = radio.sent.back();
+    CHECK(sent.to == 0xaabbccdd && sent.id == 42 && sent.want_ack && sent.channel == 2);
+    CHECK(sent.decoded.portnum == meshtastic_PortNum_PRIVATE_APP);
+    mvt::Payload payload; CHECK(mvt::decode(sent.decoded.payload.bytes, sent.decoded.payload.size, payload));
+    CHECK(payload.comment == u8"Привет \"А\"\nстрока" && payload.flags == 6);
+    command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":42,\"text\":\"duplicate\"}"); CHECK(radio.sent.size() == 1);
+    ack(g, 9, 42); ack(g, db.getNodeNum(), 42); ack(g, 0xaabbccdd, 42, 0, 5); ack(g, 0xaabbccdd, 43);
+    CHECK(g.pending.size() == 1);
+    ack(g, 0xaabbccdd, 42); CHECK(g.pending.empty());
+    auto st = lastEvent(g, "CHAT_STATUS_UPDATE"); CHECK(std::string(sget(st.get(), "status")) == "DELIVERED");
+    command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":44,\"text\":\"broadcast\"}");
+    CHECK(radio.sent.back().to == 0xffffffff && !radio.sent.back().want_ack);
+    CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "SENT");
+    size_t count = radio.sent.size();
+    command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":45,\"text\":\"bad\"}garbage"); CHECK(radio.sent.size() == count);
+    command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":45,\"recipientId\":2.5,\"text\":\"bad\"}"); CHECK(radio.sent.size() == count);
+    std::string longText(234, 'x');
+    command(g, ("{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":46,\"text\":\"" + longText + "\"}").c_str());
+    CHECK(radio.sent.size() == count); CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "FAILED");
+    // Timeout is unconfirmed; a late target ACK can still prove delivery.
+    command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":47,\"recipientId\":2864434397,\"text\":\"late\"}");
+    testMillis += 120001; g.runOnce();
+    CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "UNCONFIRMED");
+    ack(g, 0xaabbccdd, 47); CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "DELIVERED");
+    // Dispatch failure is not delivery.
+    radio.fail = true; command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":48,\"recipientId\":2,\"text\":\"fail\"}"); radio.fail = false;
+    CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "FAILED");
+    command(g, "{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"recipientId\":2864434397,\"waypoint\":{\"title\":\"Target\",\"comment\":\"точка\",\"latitude\":43.2,\"longitude\":76.8,\"altitude\":1234,\"isTarget\":true}}");
+    CHECK(radio.sent.back().to == 0xaabbccdd); CHECK(mvt::decode(radio.sent.back().decoded.payload.bytes, radio.sent.back().decoded.payload.size, payload));
+    CHECK(payload.icon == 5 && payload.altitude == 1234 && payload.name == "Target");
+    // Correlated diagnostics: unrelated fresh telemetry is never a ping proof.
+    command(g, "{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
+    CHECK(sent.decoded.want_response && sent.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP);
+    meshtastic_Telemetry t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_device_metrics_tag;
+    t.variant.device_metrics.has_battery_level = true; t.variant.device_metrics.battery_level = 66;
+    auto p = incoming(0xaabbccdd, sent.id + 1, meshtastic_PortNum_TELEMETRY_APP);
+    p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
+    g.handleReceived(p); CHECK(g.pending.size() == 1);
+    p.decoded.request_id = sent.id; p.id++; g.handleReceived(p); CHECK(g.pending.empty());
+    auto result = lastEvent(g, "PING_RESULT"); CHECK(nget(result.get(), "batteryPct") == 66 && nget(result.get(), "hops") == 2);
+    command(g, "{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
+    t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_environment_metrics_tag;
+    t.variant.environment_metrics.has_temperature = true; t.variant.environment_metrics.temperature = -12.5;
+    t.variant.environment_metrics.has_relative_humidity = true; t.variant.environment_metrics.relative_humidity = 75;
+    p = incoming(0xaabbccdd, sent.id, meshtastic_PortNum_TELEMETRY_APP);
+    p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
+    g.handleReceived(p); result = lastEvent(g, "POLL_ENV_RESULT"); CHECK(nget(result.get(), "temperature") == -12.5);
+    command(g, "{\"type\":\"CMD_TRACEROUTE\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
+    meshtastic_RouteDiscovery route = meshtastic_RouteDiscovery_init_default;
+    route.route_count = 1; route.route[0] = 7; route.snr_towards_count = 2; route.snr_towards[0] = 20; route.snr_towards[1] = -8;
+    route.route_back_count = 1; route.route_back[0] = 8; route.snr_back_count = 2; route.snr_back[0] = 12; route.snr_back[1] = 24;
+    p = incoming(0xaabbccdd, sent.id, meshtastic_PortNum_TRACEROUTE_APP);
+    p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_RouteDiscovery_msg, &route);
+    g.handleReceived(p); result = lastEvent(g, "TRACEROUTE_RESULT");
+    CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(result.get(), "outbound")) == 1); CHECK(nget(result.get(), "outboundLastSnr") == -2);
+    // Virtual beacon, optional signed altitude/heart rate, JSON escaping.
+    payload = mvt::Payload(); payload.name = u8"А\"Б"; payload.comment = u8"маяк"; payload.lat = 43.25; payload.lon = 76.9;
+    payload.flags = 16 | 32; payload.altitude = -20; payload.heartRate = 101; payload.battery = 80; payload.charging = true;
+    p = incoming(0xaabbccdd, 0, meshtastic_PortNum_PRIVATE_APP);
+    p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes));
+    g.handleReceived(p); result = lastEvent(g, "NODE_UPDATE"); auto *n = cJSON_GetObjectItem(result.get(), "node");
+    CHECK(std::string(sget(n, "nodeKey")) == "!aabbccdd_mv"); CHECK(nget(n, "alt") == -20 && nget(n, "heartRate") == 101);
+    CHECK(nget(n, "lastUpdateMs") >= 1577836800000.0);
+    size_t events = testSent.size(); g.handleReceived(p); flush(g); CHECK(testSent.size() == events);
+    // Offline reception is cached and replayed after a successful auth.
+    g.authenticated = false; p.id++; payload.name = "Offline";
+    p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes)); g.handleReceived(p);
+    CHECK(g.nodes.count("!aabbccdd_mv") == 1); command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}"); flush(g);
+    result = lastEvent(g, "NODE_UPDATE"); CHECK(std::string(sget(cJSON_GetObjectItem(result.get(), "node"), "callsign")) == "Offline");
+    // Waypoint deletion removes local replay cache, so it cannot resurrect.
+    payload.flags = 1; payload.name = "Target"; p.id++;
+    p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes)); g.handleReceived(p); CHECK(g.waypoints.size() == 1);
+    command(g, "{\"type\":\"WAYPOINT_DELETED\",\"latitude\":43.25,\"longitude\":76.9}"); CHECK(g.waypoints.empty());
+    for (const auto &queued : g.outgoing) {
+        auto e = parse(queued);
+        CHECK(std::string(sget(e.get(), "type")) != "WAYPOINT");
+        auto *msg = cJSON_GetObjectItemCaseSensitive(e.get(), "message");
+        if (msg) CHECK(!cJSON_GetObjectItemCaseSensitive(msg, "waypoint"));
+    }
+    // Packet fragments assemble before dispatch; control frames do not pollute JSON.
+    std::string padded = "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":99,\"text\":\"chunked\",\"padding\":\"" + std::string(5000, 'a') + "\"}";
+    count = radio.sent.size(); frame(g, padded, 111); CHECK(radio.sent.size() == count); g.runOnce(); CHECK(radio.sent.size() == count + 1);
+    esp_websocket_event_data_t d = {"ping", 4, 9, nullptr, nullptr, 4, 0}; g.receiveFrame(d); CHECK(!g.inputFault);
+    d = {"bad", 3, 1, nullptr, nullptr, 3, 1}; g.receiveFrame(d); CHECK(g.inputFault);
+    g.inputFault = false;
+    frame(g, "{\"type\":\"ERROR\",\"code\":\"GATEWAY_REPLACED\"}");
+    g.socketConnected = false; g.runOnce(); CHECK(g.authBlocked); CHECK(!g.socketConnected);
+    // Golden MV bytes produced by the portal's actual encoder.
+    if (argc > 1) {
+        std::ifstream vectors(argv[1]); std::string line;
+        while (std::getline(vectors, line)) {
+            auto v = parse(line); const char *wire = sget(v.get(), "hex"); std::vector<uint8_t> bytes;
+            for (size_t i = 0; i < strlen(wire); i += 2) { std::string b(wire + i, 2); bytes.push_back(uint8_t(strtoul(b.c_str(), nullptr, 16))); }
+            CHECK(mvt::decode(bytes.data(), bytes.size(), payload));
+            CHECK(payload.name == sget(v.get(), "name") && payload.comment == sget(v.get(), "comment"));
+            uint8_t encoded[233]; auto size = mvt::encode(payload, encoded, sizeof(encoded));
+            CHECK(size == bytes.size() && std::equal(bytes.begin(), bytes.end(), encoded));
+        }
+    }
+    if (argc > 2) { std::ofstream transcript(argv[2]); for (auto &e : testSent) transcript << e << '\n'; }
+    printf("WSS production handlers: %d checks passed\n", checks);
+}
