@@ -99,11 +99,13 @@ bool MvtWssGateway::wantPacket(const meshtastic_MeshPacket *p) {
 }
 const char *MvtWssGateway::displayStatus() const {
     if (!moduleConfig.mqtt.enabled) return "OFF";
-    if (!moduleConfig.mqtt.username[0] || !moduleConfig.mqtt.password[0]) return "SETUP";
+    if (!moduleConfig.mqtt.username[0]) return "SETUP";
+    if (!moduleConfig.mqtt.password[0]) return "SETKEY";
     if (displayError) return displayError;
+    if (inputFault) return "FRAME";
     if (WiFi.status() != WL_CONNECTED) return "WAIT";
     if (authenticated && socketConnected) return "OK";
-    return socketConnected ? "AUTH" : "OFF";
+    return socketConnected ? "AUTH" : "RETRY";
 }
 uint64_t MvtWssGateway::nowMs() const {
     uint32_t t = getValidTime(RTCQualityFromNet);

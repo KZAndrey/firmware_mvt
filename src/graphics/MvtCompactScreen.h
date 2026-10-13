@@ -3,8 +3,25 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <cstring>
+#include "assets/MovetainLogo.h"
 
 namespace mvtScreen {
+inline std::string statusLine(const char *status) {
+    const char *code = status ? status : "OFF";
+    if (!strcmp(code,"BADKEY")) return "BAD KEY";
+    if (!strcmp(code,"NOROOM")) return "NO ROOM";
+    if (!strcmp(code,"TAKEN")) return "OTHER GW";
+    if (!strcmp(code,"BLOCK")) return "BLOCKED";
+    if (!strcmp(code,"BADURL")) return "BAD URL";
+    if (!strcmp(code,"FAIL")) return "AUTH ERROR";
+    if (!strcmp(code,"FRAME")) return "DATA ERROR";
+    if (!strcmp(code,"SETUP")) return "SET ROOM";
+    if (!strcmp(code,"SETKEY")) return "SET KEY";
+    if (!strcmp(code,"WAIT")) return "NO WIFI";
+    if (!strcmp(code,"RETRY")) return "WSS:RETRY";
+    return std::string("WSS:") + code;
+}
 // Fixed 5x7 ASCII glyphs; a 6px cell fits ten characters on a 64px OLED.
 inline const uint8_t *glyph(char ch) {
     static const uint8_t digits[10][5] = {

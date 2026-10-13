@@ -134,3 +134,27 @@ writes. A 1.8MB factory image written to filesystem offset `0x670000` overruns
 factory file **once at `0x0`**, with DIO, 80MHz and 8MB settings. A release zip for
 Meshtastic Web Flasher requires separate correctly named firmware/OTA/filesystem
 assets; the standalone factory file is not that zip.
+
+## Movetain startup and connection messages
+
+The compact OLED shows the portal mountain mark and Movetain wordmark for two
+seconds before opening the status page. The 256-byte bitmap is generated from
+`src/graphics/assets/movetain-mark.svg` and `movetain-wordmark.svg`, copied from
+the portal `public/logo/logom.svg` and `textlogo.svg`. Regenerate from the repo
+root with `node tests/wss/build_logo.cjs` and the `sharp` package available.
+
+The final row uses readable messages that fit ten characters:
+
+| Message | Meaning |
+| --- | --- |
+| SET ROOM / SET KEY | Missing Room ID / Relay Key |
+| NO WIFI | Gateway waiting for Wi-Fi |
+| WSS:RETRY | No WSS connection; automatic connection attempts |
+| WSS:AUTH / WSS:OK | Authenticating / authenticated |
+| BAD KEY / NO ROOM | Portal rejected key / room does not exist |
+| OTHER GW / BLOCKED | Another gateway replaced this one / access restricted |
+| BAD URL / AUTH ERROR / DATA ERROR | Invalid WSS URL / authentication failure / invalid incoming frame |
+
+Wi-Fi shows OFF when disabled and WAIT when enabled but disconnected. WAIT
+alone cannot identify a wrong Wi-Fi password, unavailable AP, or signal loss.
+The Relay Key is never displayed. Other display sizes keep their original boot UI.

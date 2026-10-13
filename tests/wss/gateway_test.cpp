@@ -183,7 +183,10 @@ int main(int argc, char **argv) {
     g.displayError = nullptr; g.authenticated = false; g.socketConnected = true;
     CHECK(std::string(g.displayStatus()) == "AUTH");
     g.authenticated = true; CHECK(std::string(g.displayStatus()) == "OK");
-    g.socketConnected = false; CHECK(std::string(g.displayStatus()) == "OFF");
+    g.socketConnected = false; CHECK(std::string(g.displayStatus()) == "RETRY");
+    g.inputFault = true; CHECK(std::string(g.displayStatus()) == "FRAME"); g.inputFault = false;
+    for (const char *status : {"BADKEY","NOROOM","TAKEN","BLOCK","BADURL","FAIL","FRAME","SETUP","SETKEY","WAIT","RETRY","AUTH","OK","OFF"})
+        CHECK(mvtScreen::statusLine(status).size() <= 10);
     CHECK(mvtScreen::roomLine("ABC123", 0) == "R:ABC123");
     const std::string longRoom = "ROOM_1234567890";
     std::string visible;
@@ -200,6 +203,8 @@ int main(int argc, char **argv) {
         uint8_t pixels[64*32] = {};
         void setPixel(int x,int y) { if (!(x>=0 && x<64 && y>=0 && y<32)) { CHECK(false); } pixels[y*64+x]=255; }
     };
+    Canvas splash;
+    mvtScreen::logo(&splash,0,0);
     if (argc > 3) {
         const char *names[] = {"online", "badkey", "stats", "long-room"};
         const char *lines[][3] = {{"R:ABC123","WIFI:OK","WSS:OK"},{"R:ABC123","WIFI:OK","WSS:BADKEY"},

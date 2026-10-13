@@ -101,8 +101,9 @@ static void drawMvtStatus(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x,
 {
     display->setColor(WHITE);
     mvtScreen::row(display, x, y + 1, mvtScreen::roomLine(moduleConfig.mqtt.username, millis()));
-    mvtScreen::row(display, x, y + 11, WiFi.status() == WL_CONNECTED ? "WIFI:OK" : "WIFI:OFF");
-    mvtScreen::row(display, x, y + 21, std::string("WSS:") + (mvtWssGateway ? mvtWssGateway->displayStatus() : "OFF"));
+    mvtScreen::row(display, x, y + 11, WiFi.status() == WL_CONNECTED ? "WIFI:OK" :
+                  config.network.wifi_enabled ? "WIFI:WAIT" : "WIFI:OFF");
+    mvtScreen::row(display, x, y + 21, mvtScreen::statusLine(mvtWssGateway ? mvtWssGateway->displayStatus() : "OFF"));
 }
 static void drawMvtStats(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
@@ -621,6 +622,13 @@ void Screen::setup()
     // === Configure alert frames (e.g., "Resuming..." or region name) ===
     EINK_ADD_FRAMEFLAG(dispdev, DEMAND_FAST); // Skip slow refresh
     alertFrames[0] = [this](OLEDDisplay *display, OLEDDisplayUiState *state, int16_t x, int16_t y) {
+#if HAS_MVT_WSS_GATEWAY
+        if (displayWidth == 64 && displayHeight == 32) {
+            display->setColor(WHITE);
+            mvtScreen::logo(display, x, y);
+            return;
+        }
+#endif
 #ifdef ARCH_ESP32
         if (wakeCause == ESP_SLEEP_WAKEUP_TIMER || wakeCause == ESP_SLEEP_WAKEUP_EXT1)
             graphics::UIRenderer::drawFrameText(display, state, x, y, "Resuming...");
@@ -632,6 +640,12 @@ void Screen::setup()
         }
     };
     ui->setFrames(alertFrames, 1);
+#if HAS_MVT_WSS_GATEWAY
+    if (displayWidth == 64 && displayHeight == 32) {
+        logo_timeout = 2000;
+        ui->setOverlays(nullptr, 0);
+    }
+#endif
     ui->disableAutoTransition(); // Require manual navigation between frames
 
     // === Log buffer for on-screen logs (3 lines max) ===
