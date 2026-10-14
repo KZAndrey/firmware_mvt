@@ -239,20 +239,28 @@ int main(int argc, char **argv) {
     command(g, "{\"type\":\"WAYPOINT_DELETED\",\"latitude\":43.25,\"longitude\":76.9,\"title\":\"Fast Location\"}");
     CHECK(g.waypoints.size() == 1); CHECK(g.waypoints.begin()->second.find("SOS Emergency") != std::string::npos);
     // Packet fragments assemble before dispatch; control frames do not pollute JSON.
-    // Portal override applies to every gateway packet, never to radio configuration.
-    CHECK(g.portalHopLimit == 0);
+    // One persisted radio setting applies to portal and normal device packets.
+    CHECK(g.effectiveHopLimit() == config.lora.hop_limit);
     auto *hopPacket = g.packet(0xaabbccdd); CHECK(hopPacket->hop_limit == 4); packetPool.release(hopPacket);
     command(g, "{\"type\":\"CMD_SET_WSS_HOP_LIMIT\",\"hopLimit\":2}");
     hopPacket = g.packet(0xaabbccdd); CHECK(hopPacket->hop_limit == 2 && hopPacket->hop_start == 2); packetPool.release(hopPacket);
-    CHECK(config.lora.hop_limit == 4);
+    CHECK(config.lora.hop_limit == 2); CHECK(db.configSaves == 1);
     for (const char *invalid : {"0", "8", "1.5", "\"3\""}) {
         std::string update = "{\"type\":\"CMD_SET_WSS_HOP_LIMIT\",\"hopLimit\":" + std::string(invalid) + "}";
-        command(g, update.c_str()); CHECK(g.portalHopLimit == 2);
+        command(g, update.c_str()); CHECK(config.lora.hop_limit == 2);
     }
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> hopInfo(g.gatewayInfo(), cJSON_Delete); CHECK(nget(hopInfo.get(), "hopLimit") == 2);
-    CHECK(nget(hopInfo.get(), "radioHopLimit") == 4); CHECK(cJSON_IsTrue(cJSON_GetObjectItem(hopInfo.get(), "hopLimitControl")));
-    command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\",\"wssHopLimit\":5}"); CHECK(g.portalHopLimit == 5);
-    command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}"); CHECK(g.portalHopLimit == 0);
+    CHECK(nget(hopInfo.get(), "radioHopLimit") == 2); CHECK(cJSON_IsTrue(cJSON_GetObjectItem(hopInfo.get(), "hopLimitControl")));
+    command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\",\"wssHopLimit\":5}"); CHECK(config.lora.hop_limit == 2);
+    command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}"); CHECK(g.effectiveHopLimit() == config.lora.hop_limit);
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItem(hopInfo.get(), "unifiedHopLimit")));
+    command(g, "{\"type\":\"CMD_SET_WSS_HOP_LIMIT\",\"hopLimit\":2}"); CHECK(db.configSaves == 1);
+    db.saveSucceeds = false;
+    command(g, "{\"type\":\"CMD_SET_WSS_HOP_LIMIT\",\"hopLimit\":7}"); CHECK(config.lora.hop_limit == 2);
+    db.saveSucceeds = true;
+    config.lora.hop_limit = 6; // Meshtastic admin-side change, followed by reconnect.
+    command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\",\"wssHopLimit\":3}"); CHECK(g.effectiveHopLimit() == 6);
+    hopPacket = g.packet(0xaabbccdd); CHECK(hopPacket->hop_limit == 6); packetPool.release(hopPacket);
     std::string padded = "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":99,\"text\":\"chunked\",\"padding\":\"" + std::string(5000, 'a') + "\"}";
     count = radio.sent.size(); frame(g, padded, 111); CHECK(radio.sent.size() == count); g.runOnce(); CHECK(radio.sent.size() == count + 1);
     esp_websocket_event_data_t d = {"ping", 4, 9, nullptr, nullptr, 4, 0}; g.receiveFrame(d); CHECK(!g.inputFault);

@@ -35,7 +35,9 @@ async function connect(url) {
     gateway=await connect(url); const rows=fs.readFileSync(transcript,'utf8').trim().split('\n').map(JSON.parse);
     gateway.send(rows.find(e=>e.type==='AUTH_GATEWAY'));
     await until(()=>gateway.messages.some(e=>e.type==='AUTH_GATEWAY_SUCCESS'));
-    assert.equal(gateway.messages.find(e=>e.type==='AUTH_GATEWAY_SUCCESS').wssHopLimit,2);
+    const advertisedHops=rows.find(e=>e.type==='AUTH_GATEWAY').gatewayInfo.hopLimit;
+    assert.equal(gateway.messages.find(e=>e.type==='AUTH_GATEWAY_SUCCESS').wssHopLimit,advertisedHops);
+    assert.equal(room.state.wssHopLimit,advertisedHops);
     coord=await connect(url); coord.send({type:'AUTH',room:'ROOM1',key:'coord-secret',token:token('test-coordinator')});
     await until(()=>coord.messages.some(e=>e.type==='INIT_STATE'));
     assert(api.gatewayStatus(room).online);

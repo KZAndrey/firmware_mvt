@@ -250,7 +250,7 @@ void MvtWssGateway::publish(cJSON *p) {
     outgoing.push_back(std::move(text));
 }
 uint8_t MvtWssGateway::effectiveHopLimit() const {
-    return portalHopLimit ? portalHopLimit : config.lora.hop_limit;
+    return config.lora.hop_limit;
 }
 const char *MvtWssGateway::radioPresetName() const {
     return config.lora.use_preset ? presetName(config.lora.modem_preset) : "CUSTOM";
@@ -281,6 +281,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setNumber(p, "hopLimit", effectiveHopLimit());
     setNumber(p, "radioHopLimit", config.lora.hop_limit);
     setBool(p, "hopLimitControl", true);
+    setBool(p, "unifiedHopLimit", true);
     return p;
 }
 void MvtWssGateway::sendAuthGateway() {
@@ -643,8 +644,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         return;
     }
     if (type == "AUTH_GATEWAY_SUCCESS") {
-        double hops = number(j.get(), "wssHopLimit");
-        portalHopLimit = hops >= 1 && hops <= 7 && floor(hops) == hops ? uint8_t(hops) : 0;
+        // The persisted device setting is authoritative on reconnect.
         if (!authSent) return;
         authenticated = true; displayError = nullptr; snapshotPending = true;
         LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0;
@@ -662,7 +662,14 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
     if (type == "CMD_SET_WSS_HOP_LIMIT") {
         double hops = number(j.get(), "hopLimit");
         if (hops < 1 || hops > 7 || floor(hops) != hops) return;
-        portalHopLimit = uint8_t(hops);
+        const auto previous = config.lora.hop_limit;
+        if (previous != uint8_t(hops)) {
+            config.lora.hop_limit = uint8_t(hops);
+            if (!nodeDB->saveToDisk(SEGMENT_CONFIG)) {
+                config.lora.hop_limit = previous;
+                LOG_ERROR("MVT hop limit could not be saved");
+            }
+        }
         sendHeartbeat(); return;
     }
     if (type == "CMD_REFRESH_GATEWAY") { sendHeartbeat(); snapshotPending = true; return; }

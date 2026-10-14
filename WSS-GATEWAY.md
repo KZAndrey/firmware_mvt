@@ -179,6 +179,12 @@ are not used to infer timezone.
 
 ## Gateway parity and radio polling
 
+Direct WSS uses one persisted Meshtastic LoRa hop limit for autonomous device
+packets and portal packets. Portal changes save device configuration without
+rebooting. Refresh/reconnect Meshtastic to read the changed setting. On WSS
+reconnect the device is authoritative; an older portal limit is not reapplied.
+Device-side changes appear on the next heartbeat (up to 15 seconds).
+
 Gateway metadata includes `longName`, `shortName`, `gatewayType=WSS`, real
 `frequency` from RadioInterface::getFreq(), primary channel name/index and TX
 state. The board still uses Meshtastic 2.7.15 and the existing ESP32 SDK.

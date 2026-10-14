@@ -18,6 +18,7 @@
 #define xstr(s) ystr(s)
 #define LOG_WARN(...) ((void)0)
 #define LOG_INFO(...) ((void)0)
+#define LOG_ERROR(...) ((void)0)
 #define NODENUM_BROADCAST UINT32_MAX
 #define ERRNO_OK 0
 #define RX_SRC_LOCAL 0
