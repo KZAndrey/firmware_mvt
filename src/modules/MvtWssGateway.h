@@ -30,7 +30,7 @@ private:
         Pending() = default;
         Pending(uint32_t packet, uint32_t node, uint32_t tick, const std::string &type,
                 const std::string &key, bool mv) : id(packet), target(node), started(tick), kind(type), nodeKey(key), isVirtual(mv) {}
-        uint32_t id, target, started;
+        uint32_t id, target, started, timeout = 0;
         std::string kind, nodeKey;
         bool isVirtual;
         bool positionReceived = false, telemetryReceived = false, nodeInfoReceived = false;
@@ -42,14 +42,20 @@ private:
         bool needsInfo = false;
     };
     struct AirPoll {
-        uint32_t target=0, started=0, nextAt=0, spacing=3000, ids[2]={};
+        uint32_t target=0, started=0, nextAt=0, spacing=3000, timeout=0, ids[2]={};
         uint8_t sent=0, completed=0;
         bool environmentReceived=false, airReceived=false;
         std::string nodeKey;
         std::map<std::string,double> values;
     };
     std::deque<AirPoll> airPolls;
-    uint32_t diagnosticTimeout() const;
+    uint32_t diagnosticStep(uint32_t) const;
+    uint32_t diagnosticTimeout(uint32_t = 0, unsigned = 1, bool = false) const;
+    uint32_t nextDiagnosticAt = 0, lastDiagnosticState = 0, lastDiagnosticDispatch = 0, diagnosticGap = 0;
+    bool diagnosticSlot() const;
+    void advanceSingles();
+    void diagnosticState(uint32_t, const std::string &, const char *, uint32_t, bool);
+    void sendDiagnosticStates();
     void commandThrottled(uint32_t, const std::string &, const std::string &);
     void retireReportedPolls(uint32_t);
     void advanceAirPolls();

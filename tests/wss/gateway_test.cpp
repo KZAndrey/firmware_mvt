@@ -76,9 +76,16 @@ void ack(MvtWssGateway &g, uint32_t from, uint32_t id, int reason = 0, uint32_t 
     p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Routing_msg, &r);
     g.handleReceived(p);
 }
-void command(MvtWssGateway &g, const char *text) { g.handleIncomingCommand(text); }
+void command(MvtWssGateway &g, const char *text) {
+    g.handleIncomingCommand(text);
+    // Existing wire assertions inspect the next actual dispatch, after spacing.
+    bool queued=std::any_of(g.pending.begin(),g.pending.end(),[](const MvtWssGateway::Pending &p){return !p.id;}) ||
+        std::any_of(g.polls.begin(),g.polls.end(),[](const MvtWssGateway::Poll &p){return !p.sent;}) ||
+        std::any_of(g.airPolls.begin(),g.airPolls.end(),[](const MvtWssGateway::AirPoll &p){return !p.sent;});
+    if(queued&&!g.diagnosticSlot()){testMillis=g.nextDiagnosticAt;g.runOnce();}
+}
 int main(int argc, char **argv) {
-    config.lora.tx_enabled = true; config.lora.hop_limit = 4; moduleConfig.mqtt.enabled = true;
+    config.lora.tx_enabled = true; config.lora.hop_limit = 4; config.lora.use_preset=true; config.lora.modem_preset=meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST; moduleConfig.mqtt.enabled = true;
     strcpy(moduleConfig.mqtt.username, "ROOM1"); strcpy(moduleConfig.mqtt.password, "relay-secret");
     strcpy(owner.short_name, "MVT"); strcpy(owner.long_name, "Movetain Host");
     meshtastic_NodeInfoLite peer = {}; peer.num = 0xaabbccdd; peer.channel = 2;
@@ -372,6 +379,37 @@ int main(int argc, char **argv) {
             image << "P5\n64 32\n255\n"; image.write(reinterpret_cast<char *>(canvas.pixels),sizeof(canvas.pixels));
         }
     }
+    // Adaptive per-target windows and a shared radio dispatch slot.
+    {
+        auto previous=config.lora;
+        meshtastic_NodeInfoLite near={};near.num=0x99887766;near.has_hops_away=true;near.hops_away=0;
+        near.has_user=true;strcpy(near.user.long_name,"Near");db.nodes.push_back(near);
+        config.lora.use_preset=true;config.lora.modem_preset=meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
+        MvtWssGateway adaptive;adaptive.authenticated=true;adaptive.socketConnected=true;adaptive.authSent=true;
+        adaptive.wsClient=esp_websocket_client_init(nullptr);adaptive.serverTimeMs=1700000000000ULL;adaptive.serverTimeTick=testMillis;
+        adaptive.configuredRoom=moduleConfig.mqtt.username;adaptive.configuredKey=moduleConfig.mqtt.password;adaptive.configuredAddress=moduleConfig.mqtt.address;
+        CHECK(adaptive.diagnosticStep(near.num)==3500);
+        CHECK(adaptive.diagnosticTimeout(near.num,2)==8500);
+        CHECK(adaptive.diagnosticTimeout(near.num,1)==5000);
+        CHECK(adaptive.diagnosticTimeout(near.num,1,true)==15000);
+        db.nodes.back().hops_away=4;CHECK(adaptive.diagnosticStep(near.num)==6300);
+        config.lora.modem_preset=meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW;
+        CHECK(adaptive.diagnosticStep(near.num)==25000);CHECK(adaptive.diagnosticTimeout(near.num,3)==76500);
+        config.lora=previous;db.nodes.back().hops_away=0;
+        auto start=testMillis;auto before=radio.sent.size();
+        adaptive.handleIncomingCommand("{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2575857510}");
+        CHECK(radio.sent.size()==before+1);CHECK(adaptive.pending.front().timeout==5000);
+        adaptive.handleIncomingCommand("{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}");
+        CHECK(radio.sent.size()==before+1);CHECK(adaptive.polls.front().sent==0);
+        auto state=lastEvent(adaptive,"RADIO_COMMAND_STATE");CHECK(std::string(sget(state.get(),"state"))=="queued");
+        testMillis=start+3499;adaptive.runOnce();CHECK(radio.sent.size()==before+1);
+        testMillis=start+3500;adaptive.runOnce();CHECK(radio.sent.size()==before+2);CHECK(adaptive.polls.front().sent==1);
+        testMillis=start+5001;adaptive.runOnce();CHECK(adaptive.pending.empty());CHECK(!adaptive.polls.empty());
+        auto timeout=lastEvent(adaptive,"POLL_ENV_RESULT");CHECK(cJSON_IsFalse(cJSON_GetObjectItem(timeout.get(),"success")));
+        auto &ping=adaptive.polls.front();ping.replies=1;adaptive.sendDiagnosticStates();
+        state=lastEvent(adaptive,"RADIO_COMMAND_STATE");CHECK(std::string(sget(state.get(),"state"))=="partial");CHECK(cJSON_IsFalse(cJSON_GetObjectItem(state.get(),"blocking")));
+        config.lora=previous;
+    }
     // AIR SENSOR: two typed requests; only fresh, addressed sensor packets count.
     {
         MvtWssGateway airG;airG.authenticated=true;airG.socketConnected=true;airG.authSent=true;
@@ -382,10 +420,10 @@ int main(int argc, char **argv) {
         auto requestPacket=radio.sent.back();
         testMillis+=5000;
         command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
-        auto busy=lastEvent(airG,"COMMAND_THROTTLED");CHECK(nget(busy.get(),"remainingSec")==40);
+        auto busy=lastEvent(airG,"COMMAND_THROTTLED");CHECK(nget(busy.get(),"remainingSec")>0&&nget(busy.get(),"remainingSec")<45);auto firstWait=nget(busy.get(),"remainingSec");
         testMillis+=5000;
         command(airG,"{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}");
-        busy=lastEvent(airG,"COMMAND_THROTTLED");CHECK(nget(busy.get(),"remainingSec")==35);
+        busy=lastEvent(airG,"COMMAND_THROTTLED");CHECK(nget(busy.get(),"remainingSec")>0&&nget(busy.get(),"remainingSec")<firstWait);
         auto envId=airG.airPolls.front().ids[0];
         meshtastic_Telemetry q=meshtastic_Telemetry_init_default;
         pb_istream_t requestStream=pb_istream_from_buffer(requestPacket.decoded.payload.bytes,requestPacket.decoded.payload.size);
@@ -412,7 +450,7 @@ int main(int argc, char **argv) {
         auto airResult=lastEvent(airG,"AIR_SENSOR_RESULT");CHECK(cJSON_IsTrue(cJSON_GetObjectItem(airResult.get(),"success")));
         CHECK(cJSON_IsTrue(cJSON_GetObjectItem(airResult.get(),"final")));CHECK(nget(airResult.get(),"pm25")==0&&nget(airResult.get(),"co2")==720);
         command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
-        testMillis+=45001;airG.advanceAirPolls();CHECK(airG.airPolls.empty());
+        testMillis+=airG.airPolls.front().spacing;airG.advanceAirPolls();testMillis+=airG.airPolls.front().timeout+1;airG.advanceAirPolls();CHECK(airG.airPolls.empty());
         airResult=lastEvent(airG,"AIR_SENSOR_RESULT");CHECK(cJSON_IsFalse(cJSON_GetObjectItem(airResult.get(),"success")));
         command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
         auto &bme=airG.airPolls.front();bme.values["gasResistance"]=125.5;bme.environmentReceived=true;bme.completed=1;

@@ -80,6 +80,11 @@ async function connect(url) {
     assert.equal(gatewayMeta.longName,'Movetain Host');
     assert.equal(gatewayMeta.shortName,'MVT');
     assert.equal(gatewayMeta.frequency,'433.175 MHz');
+    assert.equal(gatewayMeta.diagnosticStatus,true);
+    const progress=rows.find(e=>e.type==='RADIO_COMMAND_STATE');assert(progress);
+    gateway.send(progress);await until(()=>coord.messages.some(e=>e.type==='RADIO_COMMAND_STATE'&&e.targetNodeId===progress.targetNodeId));
+    const visibleProgress=coord.messages.find(e=>e.type==='RADIO_COMMAND_STATE');
+    assert.equal(visibleProgress.remainingMs,progress.remainingMs);assert.equal(visibleProgress.state,progress.state);
     coord.send({type:'CMD_SET_WSS_HOP_LIMIT',hopLimit:6});
     await until(()=>gateway.messages.some(e=>e.type==='CMD_SET_WSS_HOP_LIMIT'));
     assert.equal(room.state.wssHopLimit,6);

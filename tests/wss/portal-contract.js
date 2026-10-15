@@ -6,7 +6,7 @@ const [relay, input] = process.argv.slice(2);
 const {nextStatus} = require(path.resolve(relay,'lib/chat-ack.js'));
 const rows = fs.readFileSync(input,'utf8').trim().split('\n').map(JSON.parse);
 const allowed = ['AUTH_GATEWAY','GATEWAY_HEARTBEAT','NODE_UPDATE','CHAT_MESSAGE','CHAT_STATUS_UPDATE','WAYPOINT','NODE_REMOVE',
-  'AIR_SENSOR_RESULT','PING_RESULT','POLL_ENV_RESULT','TRACEROUTE_RESULT','TRACEROUTE_TIMEOUT','COMMAND_THROTTLED'];
+  'RADIO_COMMAND_STATE','AIR_SENSOR_RESULT','PING_RESULT','POLL_ENV_RESULT','TRACEROUTE_RESULT','TRACEROUTE_TIMEOUT','COMMAND_THROTTLED'];
 let statuses = 0;
 for (const e of rows) {
   assert(allowed.includes(e.type),`unsupported event ${e.type}`);

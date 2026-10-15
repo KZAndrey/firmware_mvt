@@ -286,6 +286,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setNumber(p, "radioHopLimit", config.lora.hop_limit);
     setBool(p, "hopLimitControl", true);
     setBool(p, "unifiedHopLimit", true);
+    setBool(p, "diagnosticStatus", true);
     return p;
 }
 void MvtWssGateway::sendAuthGateway() {
@@ -531,7 +532,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     // Delivery proof must match request ID AND the intended peer, never a
     // relay's implicit ACK or our own local router acknowledgement.
     for (auto it = pending.begin(); it != pending.end();) {
-        bool matches = request == it->id && from == it->target && mp.to == nodeDB->getNodeNum();
+        bool matches = it->id && request == it->id && from == it->target && mp.to == nodeDB->getNodeNum();
         bool unsolicitedMv = it->isVirtual && it->kind == "ping" && hasMv && from == it->target &&
             !(mv.flags & (1 | 2 | 8));
         const bool chatAck = it->kind == "chat" || it->kind == "latechat";
@@ -543,6 +544,12 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
                 if (delivered || failed) { status(it->id, delivered ? "DELIVERED" : "FAILED"); it = pending.erase(it); continue; }
             }
         } else if (!chatAck && (matches || unsolicitedMv)) {
+            if(mp.decoded.portnum==meshtastic_PortNum_ROUTING_APP) {
+                meshtastic_Routing routing=meshtastic_Routing_init_default;
+                if(decodeProto(mp,&meshtastic_Routing_msg,&routing)&&routing.which_variant==meshtastic_Routing_error_reason_tag&&routing.error_reason!=meshtastic_Routing_Error_NONE) {
+                    finishDiagnostic(*it,false);it=pending.erase(it);continue;
+                }
+            }
             bool valid = it->kind == "trace" ? mp.decoded.portnum == meshtastic_PortNum_TRACEROUTE_APP :
                 it->kind == "env" ? hasTelemetry && (telemetry.which_variant == meshtastic_Telemetry_environment_metrics_tag ||
                                                       telemetry.which_variant == meshtastic_Telemetry_air_quality_metrics_tag) :
@@ -779,11 +786,8 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
             commandThrottled(target,str(j.get(),"nodeKey",key(target).c_str()),type);return;
         }
         AirPoll poll;poll.target=target;poll.nodeKey=str(j.get(),"nodeKey",key(target).c_str());poll.started=millis();poll.nextAt=millis();
-        auto *known=nodeDB->getMeshNode(target);
-        uint32_t base=config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW?5500:config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW?3000:600;
-        unsigned hops=known&&known->has_hops_away?std::max(1U,unsigned(known->hops_away)):config.lora.hop_limit;
-        poll.spacing=std::min(25000U,std::max(3000U,base*std::min(hops,6U)*2+1500));
-        airPolls.push_back(poll);advanceAirPolls();return;
+        poll.spacing=diagnosticStep(target);poll.timeout=diagnosticTimeout(target,2);
+        airPolls.push_back(poll);advanceAirPolls();sendDiagnosticStates();return;
     }
     if (type == "CMD_PING_NODE" || type == "CMD_POLL_ENV" || type == "CMD_TRACEROUTE") {
         if (!identifier(j.get(), "targetNodeId", target) || !target || target == 1 || target == NODENUM_BROADCAST) return;
@@ -811,37 +815,62 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
             poll.needsInfo = !mv && (!known || !known->has_user ||
                 (!known->user.long_name[0] && !known->user.short_name[0]));
             poll.count = mv ? 1 : poll.needsInfo ? 3 : 2;
-            uint32_t base = config.lora.modem_preset == meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW ? 5500 :
-                config.lora.modem_preset == meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW ? 3000 :
-                config.lora.modem_preset == meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST ? 600 : 500;
-            unsigned hops = known && known->has_hops_away ? std::max(1U, unsigned(known->hops_away)) : config.lora.hop_limit;
-            poll.spacing = std::min(25000U, std::max(3000U, base * std::min(hops, 6U) * 2 + 1500));
-            poll.nextAt = millis(); polls.push_back(poll); advancePolls();
+            poll.spacing=diagnosticStep(target);poll.command.timeout=diagnosticTimeout(target,poll.count);
+            poll.nextAt = millis(); polls.push_back(poll); advancePolls();sendDiagnosticStates();
             return;
         }
-        auto *p = packet(target);
-        Pending q = {p ? p->id : 0, target, millis(), kind, nodeKey, mv};
-        if (!p) { finishDiagnostic(q, false); return; }
+        Pending q={0,target,millis(),kind,nodeKey,mv};q.timeout=diagnosticTimeout(target,1,kind=="trace");
+        pending.push_back(q);advanceSingles();sendDiagnosticStates();
+    }
+}
+bool MvtWssGateway::diagnosticSlot() const { return !diagnosticGap || uint32_t(millis()-lastDiagnosticDispatch)>=diagnosticGap; }
+void MvtWssGateway::advanceSingles() {
+    if(!moduleConfig.mqtt.enabled||authBlocked||inputFault||!authenticated||!socketConnected||!diagnosticSlot())return;
+    for(auto it=pending.begin();it!=pending.end();++it) {
+        if(it->id||it->kind=="chat"||it->kind=="latechat")continue;
+        auto *p=packet(it->target);
+        if(!p){finishDiagnostic(*it,false);pending.erase(it);return;}
         p->decoded.want_response = true;
-        if (kind == "trace") {
+        if (it->kind == "trace") {
             p->decoded.portnum = meshtastic_PortNum_TRACEROUTE_APP;
-        } else if (mv && kind == "ping") {
-            // Android auto-replies to POSITION_APP requests with a fresh MV beacon.
-            p->decoded.portnum = meshtastic_PortNum_POSITION_APP;
         } else {
             meshtastic_Telemetry t = meshtastic_Telemetry_init_default;
             t.time = uint32_t(nowMs() / 1000);
-            t.which_variant = kind == "env" ? meshtastic_Telemetry_environment_metrics_tag : meshtastic_Telemetry_device_metrics_tag;
+            t.which_variant = meshtastic_Telemetry_environment_metrics_tag;
             p->decoded.portnum = meshtastic_PortNum_TELEMETRY_APP;
             p->decoded.payload.size = pb_encode_to_bytes(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
         }
-        pending.push_back(q);
-        if (!transmit(p)) { pending.pop_back(); finishDiagnostic(q, false); }
+        it->id=p->id;it->started=millis();lastDiagnosticDispatch=millis();diagnosticGap=diagnosticStep(it->target);nextDiagnosticAt=millis()+diagnosticGap;
+        if(!transmit(p)){finishDiagnostic(*it,false);pending.erase(it);}return;
     }
 }
-uint32_t MvtWssGateway::diagnosticTimeout() const {
-    return config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW?120000:
-        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW?90000:45000;
+uint32_t MvtWssGateway::diagnosticStep(uint32_t target) const {
+    uint32_t base=!config.lora.use_preset?5500:
+        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW?5500:
+        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW?3000:
+        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST?600:
+        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW?500:350;
+    auto *known=nodeDB->getMeshNode(target);
+    unsigned hops=known&&known->has_hops_away?std::max(1U,unsigned(known->hops_away)):std::max(1U,unsigned(effectiveHopLimit()));
+    return std::min(25000U,std::max(3500U,base*std::min(hops,7U)*2+1500));
+}
+uint32_t MvtWssGateway::diagnosticTimeout(uint32_t target,unsigned count,bool trace) const {
+    return trace?std::max(15000U,diagnosticStep(target)*2+1500):count*diagnosticStep(target)+1500;
+}
+void MvtWssGateway::diagnosticState(uint32_t target,const std::string &nodeKey,const char *state,uint32_t remaining,bool blocking) {
+    auto e=event("RADIO_COMMAND_STATE");cJSON_AddNumberToObject(e,"targetNodeId",target);
+    cJSON_AddStringToObject(e,"nodeKey",nodeKey.c_str());cJSON_AddStringToObject(e,"state",state);
+    cJSON_AddNumberToObject(e,"remainingMs",remaining);cJSON_AddBoolToObject(e,"blocking",blocking);publish(e);
+}
+void MvtWssGateway::sendDiagnosticStates() {
+    auto remaining=[](uint32_t start,uint32_t timeout){uint32_t age=millis()-start;return age>=timeout?0:timeout-age;};
+    uint32_t queued=diagnosticSlot()?2000:nextDiagnosticAt-millis()+2000;
+    for(const auto &p:pending)if(p.kind!="chat"&&p.kind!="latechat")
+        diagnosticState(p.target,p.nodeKey,p.id?"waiting":"queued",p.id?remaining(p.started,p.timeout):queued,true);
+    for(const auto &p:polls)diagnosticState(p.command.target,p.command.nodeKey,p.replies?"partial":p.sent?"waiting":"queued",
+        p.sent?remaining(p.command.started,p.command.timeout):queued,!p.replies);
+    for(const auto &p:airPolls)diagnosticState(p.target,p.nodeKey,p.values.empty()?(p.sent?"waiting":"queued"):"partial",
+        p.sent?remaining(p.started,p.timeout):queued,p.values.empty());
 }
 void MvtWssGateway::retireReportedPolls(uint32_t target) {
     for(auto it=polls.begin();it!=polls.end();) {
@@ -859,16 +888,16 @@ void MvtWssGateway::commandThrottled(uint32_t target,const std::string &nodeKey,
         const uint32_t age=millis()-started,remaining=age>=timeout?0:timeout-age;
         first=std::min(first,remaining);if(node==target)same=std::max(same,remaining);
     };
-    for(const auto &p:pending)if(p.kind!="latechat")wait(p.target,p.started,p.kind=="chat"?ACK_TIMEOUT:diagnosticTimeout());
+    for(const auto &p:pending)if(p.kind!="latechat")wait(p.target,p.id?p.started:millis(),p.kind=="chat"?ACK_TIMEOUT:p.id?p.timeout:diagnosticStep(p.target));
     for(const auto &p:polls) {
         if(p.replies && p.sent<p.count) {
             const uint32_t next=int32_t(p.nextAt-millis())>0?p.nextAt-millis():1;
             wait(p.command.target,millis(),next+p.spacing*(p.count-p.sent-1));
-        } else wait(p.command.target,p.command.started,diagnosticTimeout());
+        } else wait(p.command.target,p.sent?p.command.started:millis(),p.sent?p.command.timeout:diagnosticStep(p.command.target));
     }
     for(const auto &p:airPolls) {
         if(!p.values.empty()&&p.sent<2)wait(p.target,millis(),int32_t(p.nextAt-millis())>0?p.nextAt-millis():1);
-        else wait(p.target,p.started,diagnosticTimeout());
+        else wait(p.target,p.sent?p.started:millis(),p.sent?p.timeout:diagnosticStep(p.target));
     }
     auto e=event("COMMAND_THROTTLED");cJSON_AddNumberToObject(e,"targetNodeId",target);
     cJSON_AddStringToObject(e,"nodeKey",nodeKey.c_str());cJSON_AddStringToObject(e,"command",command.c_str());
@@ -885,15 +914,17 @@ void MvtWssGateway::airResult(const AirPoll &p,bool final,const char *code){
 }
 void MvtWssGateway::advanceAirPolls(){
     for(auto it=airPolls.begin();it!=airPolls.end();){
-        if(uint32_t(millis()-it->started)>=diagnosticTimeout()){airResult(*it,true,it->values.empty()?"AIR_SENSOR_NO_RESPONSE":"AIR_SENSOR_PARTIAL");it=airPolls.erase(it);continue;}
-        if(moduleConfig.mqtt.enabled&&!authBlocked&&!inputFault&&authenticated&&socketConnected&&nowMs()&&it->sent<2&&int32_t(millis()-it->nextAt)>=0){
+        if(it->sent==2&&uint32_t(millis()-it->started)>=it->timeout){airResult(*it,true,it->values.empty()?"AIR_SENSOR_NO_RESPONSE":"AIR_SENSOR_PARTIAL");it=airPolls.erase(it);continue;}
+        if(moduleConfig.mqtt.enabled&&!authBlocked&&!inputFault&&authenticated&&socketConnected&&nowMs()&&it->sent<2&&int32_t(millis()-it->nextAt)>=0&&diagnosticSlot()){
             auto *p=packet(it->target);
             if(!p){airResult(*it,true,"AIR_SENSOR_SEND_FAILED");it=airPolls.erase(it);continue;}
             meshtastic_Telemetry t=meshtastic_Telemetry_init_default;t.time=uint32_t(nowMs()/1000);
             t.which_variant=it->sent==0?meshtastic_Telemetry_environment_metrics_tag:meshtastic_Telemetry_air_quality_metrics_tag;
             p->decoded.want_response=true;p->decoded.portnum=meshtastic_PortNum_TELEMETRY_APP;
             p->decoded.payload.size=pb_encode_to_bytes(p->decoded.payload.bytes,sizeof(p->decoded.payload.bytes),&meshtastic_Telemetry_msg,&t);
-            it->ids[it->sent++]=p->id;it->nextAt=millis()+it->spacing;
+            if(!it->sent)it->started=millis();
+            it->ids[it->sent++]=p->id;it->nextAt=millis()+it->spacing;lastDiagnosticDispatch=millis();diagnosticGap=it->spacing;nextDiagnosticAt=it->nextAt;
+            it->timeout=uint32_t(millis()-it->started)+(3-it->sent)*it->spacing+1500;
             if(!transmit(p)){airResult(*it,true,"AIR_SENSOR_SEND_FAILED");it=airPolls.erase(it);continue;}
         }
         ++it;
@@ -901,7 +932,7 @@ void MvtWssGateway::advanceAirPolls(){
 }
 void MvtWssGateway::advancePolls() {
     for (auto it = polls.begin(); it != polls.end();) {
-        if (uint32_t(millis() - it->command.started) >= diagnosticTimeout()) {
+        if (it->sent==it->count && uint32_t(millis() - it->command.started) >= it->command.timeout) {
             if (!it->command.positionReceived && !it->command.telemetryReceived && !it->command.nodeInfoReceived)
                 finishDiagnostic(it->command, false);
             it = polls.erase(it); continue;
@@ -909,7 +940,7 @@ void MvtWssGateway::advancePolls() {
         if (it->sent == it->count && it->replies == (1U << it->count) - 1) {
             it = polls.erase(it); continue;
         }
-        if (moduleConfig.mqtt.enabled && !authBlocked && !inputFault && authenticated && socketConnected && nowMs() && it->sent < it->count && int32_t(millis() - it->nextAt) >= 0) {
+        if (moduleConfig.mqtt.enabled && !authBlocked && !inputFault && authenticated && socketConnected && nowMs() && it->sent < it->count && int32_t(millis() - it->nextAt) >= 0 && diagnosticSlot()) {
             const unsigned step = it->needsInfo ? it->sent : it->sent + 1;
             auto *p = packet(it->command.target);
             if (!p) { finishDiagnostic(it->command, it->replies != 0); it = polls.erase(it); continue; }
@@ -929,8 +960,10 @@ void MvtWssGateway::advancePolls() {
             uint32_t id = p->id;
             if (!transmit(p)) { finishDiagnostic(it->command, it->replies != 0); it = polls.erase(it); continue; }
             LOG_INFO("MVT poll target=%08x port=%u id=%u", it->command.target, unsigned(step == 0 ? 4 : step == 1 ? 3 : 67), id);
+            if(!it->sent)it->command.started=millis();
             it->ids[it->sent++] = id;
-            it->nextAt = millis() + it->spacing;
+            it->nextAt = millis() + it->spacing;lastDiagnosticDispatch=millis();diagnosticGap=it->spacing;nextDiagnosticAt=it->nextAt;
+            it->command.timeout=uint32_t(millis()-it->command.started)+(it->count-it->sent+1)*it->spacing+1500;
         }
         ++it;
     }
@@ -943,7 +976,7 @@ int32_t MvtWssGateway::runOnce() {
         configuredRoom = room; configuredKey = secret; configuredAddress = addr;
     }
     for (auto it = pending.begin(); it != pending.end();) {
-        if (uint32_t(millis() - it->started) >= (it->kind=="chat"||it->kind=="latechat"?ACK_TIMEOUT:diagnosticTimeout())) {
+        if (it->id && uint32_t(millis() - it->started) >= (it->kind=="chat"||it->kind=="latechat"?ACK_TIMEOUT:it->timeout)) {
             if (it->kind == "chat") {
                 status(it->id, "UNCONFIRMED"); it->kind = "latechat"; ++it;
             } else if (it->kind == "latechat" && uint32_t(millis() - it->started) < 600000) ++it;
@@ -961,13 +994,15 @@ int32_t MvtWssGateway::runOnce() {
     }
     // A server ERROR can arrive immediately before a close event. Process it
     // before reconnect logic, so replacement/admin rejection cannot loop.
-    advanceAirPolls();advancePolls();
+    advanceAirPolls();advancePolls();advanceSingles();
     char *text = nullptr;
     for (int i = 0; i < 8 && incoming && xQueueReceive(incoming, &text, 0) == pdTRUE; ++i) {
         handleIncomingCommand(text); free(text);
     }
     advanceAirPolls();
     advancePolls();
+    advanceSingles();
+    if(uint32_t(millis()-lastDiagnosticState)>=1000){sendDiagnosticStates();lastDiagnosticState=millis();}
     if (peerRejected) { authBlocked = true; if (!displayError) displayError = "BLOCK"; peerRejected = false; }
     if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked || inputFault) {
         if (wsClient) disconnectWs();
