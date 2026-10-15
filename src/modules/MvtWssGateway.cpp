@@ -838,7 +838,7 @@ void MvtWssGateway::airResult(const AirPoll &p,bool final,const char *code){
 void MvtWssGateway::advanceAirPolls(){
     for(auto it=airPolls.begin();it!=airPolls.end();){
         if(uint32_t(millis()-it->started)>=45000){airResult(*it,true,it->values.empty()?"AIR_SENSOR_NO_RESPONSE":"AIR_SENSOR_PARTIAL");it=airPolls.erase(it);continue;}
-        if(authenticated&&socketConnected&&it->sent<2&&int32_t(millis()-it->nextAt)>=0){
+        if(moduleConfig.mqtt.enabled&&!authBlocked&&!inputFault&&authenticated&&socketConnected&&nowMs()&&it->sent<2&&int32_t(millis()-it->nextAt)>=0){
             auto *p=packet(it->target);
             if(!p){airResult(*it,true,"AIR_SENSOR_SEND_FAILED");it=airPolls.erase(it);continue;}
             meshtastic_Telemetry t=meshtastic_Telemetry_init_default;t.time=uint32_t(nowMs()/1000);
