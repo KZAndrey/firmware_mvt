@@ -31,7 +31,7 @@ class SafeFile : public Print
     virtual size_t write(const uint8_t *buffer, size_t size);
 
     /**
-     * Atomically close the file (deleting any old versions) and readback the contents to confirm the hash matches
+     * Atomically close the file (overwriting any old version) and readback the contents to confirm the hash matches
      *
      * @return false for failure
      */

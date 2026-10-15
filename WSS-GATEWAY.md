@@ -179,6 +179,20 @@ are not used to infer timezone.
 
 ## Gateway parity and radio polling
 
+### Atomic owner-state persistence
+
+Backported Meshtastic firmware PR #9296 while retaining the 2.7.15 base:
+`SafeFile::close()` replaces the old file with a single rename instead of
+deleting it first. This closes the missing `/prefs/device.proto` window that
+can reset owner names after an interrupted write. Existing preferences and
+their protobuf formats are unchanged.
+
+`tests/wss/safefile_regression.py PATH_TO_ZIG` compiles the production code
+with an in-memory ESP32 filesystem adapter. It reproduces the old missing-file
+failure, injects resets at each operation boundary, and checks failed rename,
+corrupt temporary readback and repeated owner saves. This is fault simulation,
+not a physical power-cut test on the device.
+
 Direct WSS uses one persisted Meshtastic LoRa hop limit for autonomous device
 packets and portal packets. Portal changes save device configuration without
 rebooting. Refresh/reconnect Meshtastic to read the changed setting. On WSS
