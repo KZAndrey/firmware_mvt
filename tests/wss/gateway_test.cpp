@@ -186,10 +186,12 @@ int main(int argc, char **argv) {
     command(g, "{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
     t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_environment_metrics_tag;
     t.variant.environment_metrics.has_temperature = true; t.variant.environment_metrics.temperature = -12.5;
+    t.variant.environment_metrics.has_gas_resistance = true; t.variant.environment_metrics.gas_resistance = 125.5;
     t.variant.environment_metrics.has_relative_humidity = true; t.variant.environment_metrics.relative_humidity = 75;
     p = incoming(0xaabbccdd, sent.id, meshtastic_PortNum_TELEMETRY_APP);
     p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
     g.handleReceived(p); result = lastEvent(g, "POLL_ENV_RESULT"); CHECK(nget(result.get(), "temperature") == -12.5);
+    CHECK(nget(result.get(), "gasResistance") == 125.5);
     // Real AirQualityMetrics wire fields: explicit zero wins over environmental fallback.
     t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_air_quality_metrics_tag;
     t.variant.air_quality_metrics.has_pm25_standard = true; t.variant.air_quality_metrics.pm25_standard = 0;

@@ -81,6 +81,7 @@ void environmentMetrics(cJSON *n, const meshtastic_EnvironmentMetrics &m, bool r
     if (m.has_relative_humidity) setNumber(n, "humidity", m.relative_humidity);
     if (m.has_barometric_pressure) setNumber(n, "pressure", m.barometric_pressure);
     if (m.has_iaq) setNumber(n, "iaq", m.iaq);
+    if (m.has_gas_resistance) setNumber(n, "gasResistance", m.gas_resistance);
 }
 void airMetrics(cJSON *n, const meshtastic_AirQualityMetrics &m, bool result = false) {
     if (m.has_co2_temperature) setNumber(n, result ? "temperature" : "temp", m.co2_temperature);
