@@ -1,6 +1,7 @@
 #include "configuration.h"
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtWssGateway.h"
+#include <cmath>
 #include "MvtPayload.h"
 #include "MvtRootCA.h"
 #include "MeshService.h"
@@ -463,6 +464,29 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_default;
     bool hasTelemetry = mp.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP &&
         decodeProto(mp, &meshtastic_Telemetry_msg, &telemetry);
+    if (hasTelemetry && !mp.decoded.want_response && mp.to == nodeDB->getNodeNum()) {
+        for (auto it=airPolls.begin();it!=airPolls.end();) {
+            const bool env=telemetry.which_variant==meshtastic_Telemetry_environment_metrics_tag;
+            const bool air=telemetry.which_variant==meshtastic_Telemetry_air_quality_metrics_tag;
+            const unsigned index=air?1:0;
+            if (from!=it->target || (!env&&!air) || it->sent<=index || (request&&request!=it->ids[index])) { ++it;continue; }
+            if(env){
+                it->environmentReceived=true;
+                const auto &m=telemetry.variant.environment_metrics;
+                if(m.has_iaq&&m.iaq<=500)it->values["iaq"]=m.iaq;
+                if(m.has_gas_resistance&&std::isfinite(m.gas_resistance)&&m.gas_resistance>=0&&m.gas_resistance<=1000000)it->values["gasResistance"]=m.gas_resistance;
+            } else {
+                it->airReceived=true;
+                const auto &m=telemetry.variant.air_quality_metrics;
+                if(m.has_pm25_standard&&m.pm25_standard<=1000000)it->values["pm25"]=m.pm25_standard;
+                else if(!m.has_pm25_standard&&m.has_pm25_environmental&&m.pm25_environmental<=1000000)it->values["pm25"]=m.pm25_environmental;
+                if(m.has_co2&&m.co2<=1000000)it->values["co2"]=m.co2;
+            }
+            bool final=it->environmentReceived&&it->airReceived;
+            if(!it->values.empty()||final)airResult(*it,final,final&&it->values.empty()?"AIR_SENSOR_NO_DATA":nullptr);
+            if(final)it=airPolls.erase(it);else ++it;
+        }
+    }
     mvt::Payload mv;
     bool hasMv = mp.decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
         mvt::decode(mp.decoded.payload.bytes, mp.decoded.payload.size, mv);
@@ -738,13 +762,25 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if (id) { if (completedCommands.size() >= 64) completedCommands.pop_front(); completedCommands.push_back(id); }
         return;
     }
+    if (type == "CMD_POLL_AIR") {
+        if (!identifier(j.get(),"targetNodeId",target)||target<=1||target==NODENUM_BROADCAST||jsonBool(j.get(),"isVirtual"))return;
+        if(airPolls.size()+polls.size()+std::count_if(pending.begin(),pending.end(),[](const Pending &p){return p.kind!="latechat";})>=MAX_PENDING||std::any_of(airPolls.begin(),airPolls.end(),[target](const AirPoll &p){return p.target==target;})||std::any_of(polls.begin(),polls.end(),[target](const Poll &p){return p.command.target==target;})||std::any_of(pending.begin(),pending.end(),[target](const Pending &p){return p.target==target&&p.kind!="chat"&&p.kind!="latechat";})){
+            auto e=event("COMMAND_THROTTLED");cJSON_AddNumberToObject(e,"targetNodeId",target);cJSON_AddNumberToObject(e,"remainingSec",45);publish(e);return;
+        }
+        AirPoll poll;poll.target=target;poll.nodeKey=str(j.get(),"nodeKey",key(target).c_str());poll.started=millis();poll.nextAt=millis();
+        auto *known=nodeDB->getMeshNode(target);
+        uint32_t base=config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW?5500:config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW?3000:600;
+        unsigned hops=known&&known->has_hops_away?std::max(1U,unsigned(known->hops_away)):config.lora.hop_limit;
+        poll.spacing=std::min(25000U,std::max(3000U,base*std::min(hops,6U)*2+1500));
+        airPolls.push_back(poll);advanceAirPolls();return;
+    }
     if (type == "CMD_PING_NODE" || type == "CMD_POLL_ENV" || type == "CMD_TRACEROUTE") {
         if (!identifier(j.get(), "targetNodeId", target) || !target || target == 1 || target == NODENUM_BROADCAST) return;
         bool mv = jsonBool(j.get(), "isVirtual");
         std::string nodeKey = str(j.get(), "nodeKey", key(target, mv).c_str());
         std::string kind = type == "CMD_TRACEROUTE" ? "trace" : type == "CMD_POLL_ENV" ? "env" : "ping";
         const size_t active = std::count_if(pending.begin(), pending.end(), [](const Pending &p) { return p.kind != "latechat"; });
-        if (active + polls.size() >= MAX_PENDING || std::any_of(polls.begin(), polls.end(), [target](const Poll &p) { return p.command.target == target; }) || std::any_of(pending.begin(), pending.end(), [target](const Pending &p) {
+        if (active + polls.size() + airPolls.size() >= MAX_PENDING || std::any_of(airPolls.begin(),airPolls.end(),[target](const AirPoll &p){return p.target==target;}) || std::any_of(polls.begin(), polls.end(), [target](const Poll &p) { return p.command.target == target; }) || std::any_of(pending.begin(), pending.end(), [target](const Pending &p) {
             return p.target == target && p.kind != "chat" && p.kind != "latechat";
         })) {
             auto e = event("COMMAND_THROTTLED"); cJSON_AddNumberToObject(e, "targetNodeId", target);
@@ -792,6 +828,29 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if (!transmit(p)) { pending.pop_back(); finishDiagnostic(q, false); }
     }
 }
+void MvtWssGateway::airResult(const AirPoll &p,bool final,const char *code){
+    auto e=event("AIR_SENSOR_RESULT");cJSON_AddNumberToObject(e,"targetNodeId",p.target);cJSON_AddStringToObject(e,"targetNodeHex",hex(p.target).c_str());cJSON_AddStringToObject(e,"nodeKey",p.nodeKey.c_str());
+    cJSON_AddBoolToObject(e,"success",!p.values.empty());cJSON_AddBoolToObject(e,"final",final);cJSON_AddBoolToObject(e,"partial",!(p.environmentReceived&&p.airReceived));
+    cJSON_AddBoolToObject(e,"environmentReceived",p.environmentReceived);cJSON_AddBoolToObject(e,"airReceived",p.airReceived);cJSON_AddNumberToObject(e,"rttMs",uint32_t(millis()-p.started));
+    for(const auto &v:p.values)cJSON_AddNumberToObject(e,v.first.c_str(),v.second);
+    if(code)cJSON_AddStringToObject(e,"code",code);publish(e);
+}
+void MvtWssGateway::advanceAirPolls(){
+    for(auto it=airPolls.begin();it!=airPolls.end();){
+        if(uint32_t(millis()-it->started)>=45000){airResult(*it,true,it->values.empty()?"AIR_SENSOR_NO_RESPONSE":"AIR_SENSOR_PARTIAL");it=airPolls.erase(it);continue;}
+        if(authenticated&&socketConnected&&it->sent<2&&int32_t(millis()-it->nextAt)>=0){
+            auto *p=packet(it->target);
+            if(!p){airResult(*it,true,"AIR_SENSOR_SEND_FAILED");it=airPolls.erase(it);continue;}
+            meshtastic_Telemetry t=meshtastic_Telemetry_init_default;t.time=uint32_t(nowMs()/1000);
+            t.which_variant=it->sent==0?meshtastic_Telemetry_environment_metrics_tag:meshtastic_Telemetry_air_quality_metrics_tag;
+            p->decoded.want_response=true;p->decoded.portnum=meshtastic_PortNum_TELEMETRY_APP;
+            p->decoded.payload.size=pb_encode_to_bytes(p->decoded.payload.bytes,sizeof(p->decoded.payload.bytes),&meshtastic_Telemetry_msg,&t);
+            it->ids[it->sent++]=p->id;it->nextAt=millis()+it->spacing;
+            if(!transmit(p)){airResult(*it,true,"AIR_SENSOR_SEND_FAILED");it=airPolls.erase(it);continue;}
+        }
+        ++it;
+    }
+}
 void MvtWssGateway::advancePolls() {
     for (auto it = polls.begin(); it != polls.end();) {
         if (uint32_t(millis() - it->command.started) >= ACK_TIMEOUT) {
@@ -832,7 +891,7 @@ int32_t MvtWssGateway::runOnce() {
     std::string room = moduleConfig.mqtt.username, secret = moduleConfig.mqtt.password, addr = moduleConfig.mqtt.address;
     if (room != configuredRoom || secret != configuredKey || addr != configuredAddress) {
         disconnectWs(); authBlocked = false; displayError = nullptr;
-        outgoing.clear(); pending.clear(); polls.clear(); completedCommands.clear();
+        outgoing.clear(); pending.clear(); polls.clear(); airPolls.clear(); completedCommands.clear();
         configuredRoom = room; configuredKey = secret; configuredAddress = addr;
     }
     for (auto it = pending.begin(); it != pending.end();) {
@@ -858,6 +917,7 @@ int32_t MvtWssGateway::runOnce() {
     for (int i = 0; i < 8 && incoming && xQueueReceive(incoming, &text, 0) == pdTRUE; ++i) {
         handleIncomingCommand(text); free(text);
     }
+    advanceAirPolls();
     advancePolls();
     if (peerRejected) { authBlocked = true; if (!displayError) displayError = "BLOCK"; peerRejected = false; }
     if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked || inputFault) {
@@ -878,6 +938,7 @@ int32_t MvtWssGateway::runOnce() {
     if (uint32_t(millis() - lastHeartbeatMs) >= 15000) sendHeartbeat();
     // Wait for a clock before replaying events; never send uptime as Unix time.
     if (!nowMs()) return 100;
+    advanceAirPolls();
     advancePolls();
     if (snapshotPending) sendSnapshot();
     for (int i = 0; i < 4 && !outgoing.empty(); ++i) {

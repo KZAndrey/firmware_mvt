@@ -42,7 +42,7 @@ async function connect(url) {
     await until(()=>coord.messages.some(e=>e.type==='INIT_STATE'));
     assert(api.gatewayStatus(room).online);
     // Actual produced node telemetry survives current server sanitizers/storage.
-    for(const e of rows.filter(e=>['NODE_UPDATE','CHAT_MESSAGE','PING_RESULT','POLL_ENV_RESULT','TRACEROUTE_RESULT'].includes(e.type))) {
+    for(const e of rows.filter(e=>['NODE_UPDATE','CHAT_MESSAGE','AIR_SENSOR_RESULT','PING_RESULT','POLL_ENV_RESULT','TRACEROUTE_RESULT'].includes(e.type))) {
       // Rebase the deterministic host clock fixture to the live test server.
       if(e.node && e.node.lastUpdateMs)e.node.lastUpdateMs=Date.now(); if(e.message)e.message.timestampMs=Date.now(); gateway.send(e);
     }
@@ -50,6 +50,7 @@ async function connect(url) {
     const node=room.state.participants.get('!aabbccdd_mv');
     assert.equal(node.heartRate,101); assert.equal(node.alt,-20); assert.equal(node.callsign,'Offline');
     assert(node.lastUpdateMs>=1577836800000); assert(room.state.trackHistory.get('!aabbccdd_mv').length>0);
+    await until(()=>coord.messages.some(e=>e.type==='AIR_SENSOR_RESULT'&&e.final&&e.success&&e.co2===720));
     // Historical/partial snapshots cannot erase newer position or full name.
     const nativeKey='!aabbccdd', liveTime=Date.now();
     gateway.send({type:'NODE_UPDATE',node:{nodeKey:nativeKey,nodeId:0xaabbccdd,callsign:'A',
@@ -94,7 +95,7 @@ async function connect(url) {
     await until(()=>room.state.messages.find(m=>m.id===chat.id)?.status==='UNCONFIRMED');
     gateway.send({type:'CHAT_STATUS_UPDATE',id:chat.id,status:'DELIVERED'});
     await until(()=>room.state.messages.find(m=>m.id===chat.id)?.status==='DELIVERED');
-    for(const type of ['CMD_PING_NODE','CMD_POLL_ENV','CMD_TRACEROUTE']) {
+    for(const type of ['CMD_PING_NODE','CMD_POLL_ENV','CMD_POLL_AIR','CMD_TRACEROUTE']) {
       coord.send({type,targetNodeId:0xaabbccdd,nodeKey:'!aabbccdd_mv',isVirtual:true});
       await until(()=>gateway.messages.some(e=>e.type===type));
       const cmd=gateway.messages.find(e=>e.type===type); assert.equal(cmd.targetNodeId,0xaabbccdd); assert.equal(cmd.isVirtual,true);

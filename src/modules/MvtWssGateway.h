@@ -41,6 +41,16 @@ private:
         uint8_t count = 0, sent = 0, replies = 0;
         bool needsInfo = false;
     };
+    struct AirPoll {
+        uint32_t target=0, started=0, nextAt=0, spacing=3000, ids[2]={};
+        uint8_t sent=0;
+        bool environmentReceived=false, airReceived=false;
+        std::string nodeKey;
+        std::map<std::string,double> values;
+    };
+    std::deque<AirPoll> airPolls;
+    void advanceAirPolls();
+    void airResult(const AirPoll &, bool, const char * = nullptr);
     std::deque<Poll> polls;
     void advancePolls();
     esp_websocket_client_handle_t wsClient = nullptr;

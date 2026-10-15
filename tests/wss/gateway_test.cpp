@@ -1,3 +1,4 @@
+#include <pb_decode.h>
 // Compile the production gateway with deterministic radio/socket adapters.
 #include "configuration.h"
 #include <memory>
@@ -370,6 +371,42 @@ int main(int argc, char **argv) {
             std::ofstream image(std::string(argv[3])+(i==0?"/screen-network.pgm":"/screen-clock.pgm"),std::ios::binary);
             image << "P5\n64 32\n255\n"; image.write(reinterpret_cast<char *>(canvas.pixels),sizeof(canvas.pixels));
         }
+    }
+    // AIR SENSOR: two typed requests; only fresh, addressed sensor packets count.
+    {
+        MvtWssGateway airG;airG.authenticated=true;airG.socketConnected=true;airG.authSent=true;
+        airG.wsClient=esp_websocket_client_init(nullptr);airG.serverTimeMs=1700000000000ULL;airG.serverTimeTick=testMillis;
+        airG.configuredRoom=moduleConfig.mqtt.username;airG.configuredKey=moduleConfig.mqtt.password;airG.configuredAddress=moduleConfig.mqtt.address;
+        command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
+        CHECK(airG.airPolls.size()==1);CHECK(airG.airPolls.front().sent==1);
+        auto envId=airG.airPolls.front().ids[0];auto requestPacket=radio.sent.back();
+        meshtastic_Telemetry q=meshtastic_Telemetry_init_default;
+        pb_istream_t requestStream=pb_istream_from_buffer(requestPacket.decoded.payload.bytes,requestPacket.decoded.payload.size);
+        CHECK(pb_decode(&requestStream,&meshtastic_Telemetry_msg,&q));
+        CHECK(q.which_variant==meshtastic_Telemetry_environment_metrics_tag);
+        q=meshtastic_Telemetry_init_default;q.which_variant=meshtastic_Telemetry_environment_metrics_tag;
+        q.variant.environment_metrics.has_iaq=true;q.variant.environment_metrics.iaq=0;
+        q.variant.environment_metrics.has_gas_resistance=true;q.variant.environment_metrics.gas_resistance=125.5;
+        auto reply=incoming(0xaabbccdd,envId+1,meshtastic_PortNum_TELEMETRY_APP);
+        reply.decoded.payload.size=pb_encode_to_bytes(reply.decoded.payload.bytes,sizeof(reply.decoded.payload.bytes),&meshtastic_Telemetry_msg,&q);
+        airG.handleReceived(reply);CHECK(airG.airPolls.front().values.empty());
+        reply.decoded.request_id=envId;reply.id=radio.nextId++;airG.handleReceived(reply);
+        CHECK(airG.airPolls.front().values.at("iaq")==0);CHECK(airG.airPolls.front().values.at("gasResistance")==125.5);
+        testMillis+=airG.airPolls.front().spacing;airG.advanceAirPolls();CHECK(airG.airPolls.front().sent==2);
+        requestPacket=radio.sent.back();q=meshtastic_Telemetry_init_default;
+        requestStream=pb_istream_from_buffer(requestPacket.decoded.payload.bytes,requestPacket.decoded.payload.size);
+        CHECK(pb_decode(&requestStream,&meshtastic_Telemetry_msg,&q));
+        CHECK(q.which_variant==meshtastic_Telemetry_air_quality_metrics_tag);
+        q.variant.air_quality_metrics.has_pm25_standard=true;q.variant.air_quality_metrics.pm25_standard=0;
+        q.variant.air_quality_metrics.has_co2=true;q.variant.air_quality_metrics.co2=720;
+        reply=incoming(0xaabbccdd,airG.airPolls.front().ids[1],meshtastic_PortNum_TELEMETRY_APP);
+        reply.decoded.payload.size=pb_encode_to_bytes(reply.decoded.payload.bytes,sizeof(reply.decoded.payload.bytes),&meshtastic_Telemetry_msg,&q);
+        airG.handleReceived(reply);CHECK(airG.airPolls.empty());
+        auto airResult=lastEvent(airG,"AIR_SENSOR_RESULT");CHECK(cJSON_IsTrue(cJSON_GetObjectItem(airResult.get(),"success")));
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(airResult.get(),"final")));CHECK(nget(airResult.get(),"pm25")==0&&nget(airResult.get(),"co2")==720);
+        command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
+        testMillis+=45001;airG.advanceAirPolls();CHECK(airG.airPolls.empty());
+        airResult=lastEvent(airG,"AIR_SENSOR_RESULT");CHECK(cJSON_IsFalse(cJSON_GetObjectItem(airResult.get(),"success")));
     }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {
