@@ -88,6 +88,8 @@ void airMetrics(cJSON *n, const meshtastic_AirQualityMetrics &m, bool result = f
     if (m.has_pm_temperature) setNumber(n, result ? "temperature" : "temp", m.pm_temperature);
     if (m.has_pm_humidity) setNumber(n, "humidity", m.pm_humidity);
     if (m.has_co2) setNumber(n, "co2", m.co2);
+    if (m.has_pm25_standard) setNumber(n, "pm25", m.pm25_standard);
+    else if (m.has_pm25_environmental) setNumber(n, "pm25", m.pm25_environmental);
 }
 const char *regionName(int value) {
     switch (value) {

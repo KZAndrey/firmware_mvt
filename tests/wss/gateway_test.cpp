@@ -190,6 +190,17 @@ int main(int argc, char **argv) {
     p = incoming(0xaabbccdd, sent.id, meshtastic_PortNum_TELEMETRY_APP);
     p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
     g.handleReceived(p); result = lastEvent(g, "POLL_ENV_RESULT"); CHECK(nget(result.get(), "temperature") == -12.5);
+    // Real AirQualityMetrics wire fields: explicit zero wins over environmental fallback.
+    t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_air_quality_metrics_tag;
+    t.variant.air_quality_metrics.has_pm25_standard = true; t.variant.air_quality_metrics.pm25_standard = 0;
+    t.variant.air_quality_metrics.has_pm25_environmental = true; t.variant.air_quality_metrics.pm25_environmental = 19;
+    t.variant.air_quality_metrics.has_co2 = true; t.variant.air_quality_metrics.co2 = 720;
+    p = incoming(0xaabbccdd, 0, meshtastic_PortNum_TELEMETRY_APP);
+    p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Telemetry_msg, &t);
+    g.handleReceived(p); result = lastEvent(g, "NODE_UPDATE");
+    auto *airNode = cJSON_GetObjectItem(result.get(), "node");
+    CHECK(nget(airNode, "pm25") == 0 && nget(airNode, "co2") == 720);
+    CHECK(!cJSON_GetObjectItem(airNode, "iaq"));
     command(g, "{\"type\":\"CMD_TRACEROUTE\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
     meshtastic_RouteDiscovery route = meshtastic_RouteDiscovery_init_default;
     route.route_count = 1; route.route[0] = 7; route.snr_towards_count = 2; route.snr_towards[0] = 20; route.snr_towards[1] = -8;
