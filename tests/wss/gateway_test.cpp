@@ -414,6 +414,14 @@ int main(int argc, char **argv) {
         command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
         testMillis+=45001;airG.advanceAirPolls();CHECK(airG.airPolls.empty());
         airResult=lastEvent(airG,"AIR_SENSOR_RESULT");CHECK(cJSON_IsFalse(cJSON_GetObjectItem(airResult.get(),"success")));
+        command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
+        auto &bme=airG.airPolls.front();bme.values["gasResistance"]=125.5;bme.environmentReceived=true;bme.completed=1;
+        testMillis+=bme.spacing;airG.advanceAirPolls();
+        auto nack=incoming(0xaabbccdd,bme.ids[1],meshtastic_PortNum_ROUTING_APP);
+        meshtastic_Routing noSensor=meshtastic_Routing_init_default;noSensor.which_variant=meshtastic_Routing_error_reason_tag;noSensor.error_reason=meshtastic_Routing_Error_NO_RESPONSE;
+        nack.decoded.payload.size=pb_encode_to_bytes(nack.decoded.payload.bytes,sizeof(nack.decoded.payload.bytes),&meshtastic_Routing_msg,&noSensor);
+        airG.handleReceived(nack);CHECK(airG.airPolls.empty());
+        auto partial=lastEvent(airG,"AIR_SENSOR_RESULT");CHECK(cJSON_IsTrue(cJSON_GetObjectItem(partial.get(),"success")));CHECK(cJSON_IsTrue(cJSON_GetObjectItem(partial.get(),"final")));CHECK(cJSON_IsFalse(cJSON_GetObjectItem(partial.get(),"airReceived")));
         MvtWssGateway::Poll completed;completed.command={42,0xaabbccdd,testMillis,"ping","!aabbccdd",false};
         completed.count=2;completed.sent=2;completed.replies=1;airG.polls.push_back(completed);
         command(airG,"{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}");

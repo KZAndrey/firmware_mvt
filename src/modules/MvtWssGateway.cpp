@@ -464,6 +464,15 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_default;
     bool hasTelemetry = mp.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP &&
         decodeProto(mp, &meshtastic_Telemetry_msg, &telemetry);
+    if(mp.decoded.portnum==meshtastic_PortNum_ROUTING_APP && mp.to==nodeDB->getNodeNum() && !mp.decoded.want_response) {
+        meshtastic_Routing routing=meshtastic_Routing_init_default;
+        if(decodeProto(mp,&meshtastic_Routing_msg,&routing) && routing.which_variant==meshtastic_Routing_error_reason_tag && routing.error_reason!=meshtastic_Routing_Error_NONE) {
+            for(auto it=airPolls.begin();it!=airPolls.end();) {
+                if(from==it->target)for(unsigned i=0;i<it->sent;++i)if(request==it->ids[i])it->completed|=1U<<i;
+                if(it->completed==3){airResult(*it,true,it->values.empty()?"AIR_SENSOR_NO_DATA":"AIR_SENSOR_PARTIAL");it=airPolls.erase(it);}else ++it;
+            }
+        }
+    }
     if (hasTelemetry && !mp.decoded.want_response && mp.to == nodeDB->getNodeNum()) {
         for (auto it=airPolls.begin();it!=airPolls.end();) {
             const bool env=telemetry.which_variant==meshtastic_Telemetry_environment_metrics_tag;
@@ -482,7 +491,8 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
                 else if(!m.has_pm25_standard&&m.has_pm25_environmental&&m.pm25_environmental<=1000000)it->values["pm25"]=m.pm25_environmental;
                 if(m.has_co2&&m.co2<=1000000)it->values["co2"]=m.co2;
             }
-            bool final=it->environmentReceived&&it->airReceived;
+            it->completed|=1U<<index;
+            bool final=it->completed==3;
             if(!it->values.empty()||final)airResult(*it,final,final&&it->values.empty()?"AIR_SENSOR_NO_DATA":nullptr);
             if(final)it=airPolls.erase(it);else ++it;
         }
@@ -850,7 +860,12 @@ void MvtWssGateway::commandThrottled(uint32_t target,const std::string &nodeKey,
         first=std::min(first,remaining);if(node==target)same=std::max(same,remaining);
     };
     for(const auto &p:pending)if(p.kind!="latechat")wait(p.target,p.started,p.kind=="chat"?ACK_TIMEOUT:diagnosticTimeout());
-    for(const auto &p:polls)wait(p.command.target,p.command.started,diagnosticTimeout());
+    for(const auto &p:polls) {
+        if(p.replies && p.sent<p.count) {
+            const uint32_t next=int32_t(p.nextAt-millis())>0?p.nextAt-millis():1;
+            wait(p.command.target,millis(),next+p.spacing*(p.count-p.sent-1));
+        } else wait(p.command.target,p.command.started,diagnosticTimeout());
+    }
     for(const auto &p:airPolls) {
         if(!p.values.empty()&&p.sent<2)wait(p.target,millis(),int32_t(p.nextAt-millis())>0?p.nextAt-millis():1);
         else wait(p.target,p.started,diagnosticTimeout());

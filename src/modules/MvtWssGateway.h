@@ -43,7 +43,7 @@ private:
     };
     struct AirPoll {
         uint32_t target=0, started=0, nextAt=0, spacing=3000, ids[2]={};
-        uint8_t sent=0;
+        uint8_t sent=0, completed=0;
         bool environmentReceived=false, airReceived=false;
         std::string nodeKey;
         std::map<std::string,double> values;
