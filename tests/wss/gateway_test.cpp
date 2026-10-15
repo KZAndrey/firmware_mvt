@@ -379,7 +379,14 @@ int main(int argc, char **argv) {
         airG.configuredRoom=moduleConfig.mqtt.username;airG.configuredKey=moduleConfig.mqtt.password;airG.configuredAddress=moduleConfig.mqtt.address;
         command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
         CHECK(airG.airPolls.size()==1);CHECK(airG.airPolls.front().sent==1);
-        auto envId=airG.airPolls.front().ids[0];auto requestPacket=radio.sent.back();
+        auto requestPacket=radio.sent.back();
+        testMillis+=5000;
+        command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
+        auto busy=lastEvent(airG,"COMMAND_THROTTLED");CHECK(nget(busy.get(),"remainingSec")==40);
+        testMillis+=5000;
+        command(airG,"{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}");
+        busy=lastEvent(airG,"COMMAND_THROTTLED");CHECK(nget(busy.get(),"remainingSec")==35);
+        auto envId=airG.airPolls.front().ids[0];
         meshtastic_Telemetry q=meshtastic_Telemetry_init_default;
         pb_istream_t requestStream=pb_istream_from_buffer(requestPacket.decoded.payload.bytes,requestPacket.decoded.payload.size);
         CHECK(pb_decode(&requestStream,&meshtastic_Telemetry_msg,&q));
@@ -407,6 +414,11 @@ int main(int argc, char **argv) {
         command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
         testMillis+=45001;airG.advanceAirPolls();CHECK(airG.airPolls.empty());
         airResult=lastEvent(airG,"AIR_SENSOR_RESULT");CHECK(cJSON_IsFalse(cJSON_GetObjectItem(airResult.get(),"success")));
+        MvtWssGateway::Poll completed;completed.command={42,0xaabbccdd,testMillis,"ping","!aabbccdd",false};
+        completed.count=2;completed.sent=2;completed.replies=1;airG.polls.push_back(completed);
+        command(airG,"{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}");
+        CHECK(airG.polls.empty());CHECK(!airG.pending.empty()&&airG.pending.back().kind=="env");
+
     }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {

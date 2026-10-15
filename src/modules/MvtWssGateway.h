@@ -49,6 +49,9 @@ private:
         std::map<std::string,double> values;
     };
     std::deque<AirPoll> airPolls;
+    uint32_t diagnosticTimeout() const;
+    void commandThrottled(uint32_t, const std::string &, const std::string &);
+    void retireReportedPolls(uint32_t);
     void advanceAirPolls();
     void airResult(const AirPoll &, bool, const char * = nullptr);
     std::deque<Poll> polls;

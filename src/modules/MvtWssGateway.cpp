@@ -764,8 +764,9 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
     }
     if (type == "CMD_POLL_AIR") {
         if (!identifier(j.get(),"targetNodeId",target)||target<=1||target==NODENUM_BROADCAST||jsonBool(j.get(),"isVirtual"))return;
+        retireReportedPolls(target);
         if(airPolls.size()+polls.size()+std::count_if(pending.begin(),pending.end(),[](const Pending &p){return p.kind!="latechat";})>=MAX_PENDING||std::any_of(airPolls.begin(),airPolls.end(),[target](const AirPoll &p){return p.target==target;})||std::any_of(polls.begin(),polls.end(),[target](const Poll &p){return p.command.target==target;})||std::any_of(pending.begin(),pending.end(),[target](const Pending &p){return p.target==target&&p.kind!="chat"&&p.kind!="latechat";})){
-            auto e=event("COMMAND_THROTTLED");cJSON_AddNumberToObject(e,"targetNodeId",target);cJSON_AddNumberToObject(e,"remainingSec",45);publish(e);return;
+            commandThrottled(target,str(j.get(),"nodeKey",key(target).c_str()),type);return;
         }
         AirPoll poll;poll.target=target;poll.nodeKey=str(j.get(),"nodeKey",key(target).c_str());poll.started=millis();poll.nextAt=millis();
         auto *known=nodeDB->getMeshNode(target);
@@ -779,12 +780,12 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         bool mv = jsonBool(j.get(), "isVirtual");
         std::string nodeKey = str(j.get(), "nodeKey", key(target, mv).c_str());
         std::string kind = type == "CMD_TRACEROUTE" ? "trace" : type == "CMD_POLL_ENV" ? "env" : "ping";
+        retireReportedPolls(target);
         const size_t active = std::count_if(pending.begin(), pending.end(), [](const Pending &p) { return p.kind != "latechat"; });
         if (active + polls.size() + airPolls.size() >= MAX_PENDING || std::any_of(airPolls.begin(),airPolls.end(),[target](const AirPoll &p){return p.target==target;}) || std::any_of(polls.begin(), polls.end(), [target](const Poll &p) { return p.command.target == target; }) || std::any_of(pending.begin(), pending.end(), [target](const Pending &p) {
             return p.target == target && p.kind != "chat" && p.kind != "latechat";
         })) {
-            auto e = event("COMMAND_THROTTLED"); cJSON_AddNumberToObject(e, "targetNodeId", target);
-            cJSON_AddStringToObject(e, "nodeKey", nodeKey.c_str()); cJSON_AddNumberToObject(e, "remainingSec", 120); publish(e); return;
+            commandThrottled(target,nodeKey,type);return;
         }
         if (target == nodeDB->getNodeNum() && kind == "ping") {
             auto e = event("PING_RESULT"); cJSON_AddNumberToObject(e, "targetNodeId", target);
@@ -828,6 +829,38 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if (!transmit(p)) { pending.pop_back(); finishDiagnostic(q, false); }
     }
 }
+uint32_t MvtWssGateway::diagnosticTimeout() const {
+    return config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW?120000:
+        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW?90000:45000;
+}
+void MvtWssGateway::retireReportedPolls(uint32_t target) {
+    for(auto it=polls.begin();it!=polls.end();) {
+        if(it->command.target==target && it->sent==it->count && it->replies)it=polls.erase(it);else ++it;
+    }
+    for(auto it=airPolls.begin();it!=airPolls.end();) {
+        if(it->target==target && it->sent==2 && !it->values.empty()) {
+            airResult(*it,true,"AIR_SENSOR_PARTIAL");it=airPolls.erase(it);
+        } else ++it;
+    }
+}
+void MvtWssGateway::commandThrottled(uint32_t target,const std::string &nodeKey,const std::string &command) {
+    uint32_t same=0,first=UINT32_MAX;
+    auto wait=[&](uint32_t node,uint32_t started,uint32_t timeout){
+        const uint32_t age=millis()-started,remaining=age>=timeout?0:timeout-age;
+        first=std::min(first,remaining);if(node==target)same=std::max(same,remaining);
+    };
+    for(const auto &p:pending)if(p.kind!="latechat")wait(p.target,p.started,p.kind=="chat"?ACK_TIMEOUT:diagnosticTimeout());
+    for(const auto &p:polls)wait(p.command.target,p.command.started,diagnosticTimeout());
+    for(const auto &p:airPolls) {
+        if(!p.values.empty()&&p.sent<2)wait(p.target,millis(),int32_t(p.nextAt-millis())>0?p.nextAt-millis():1);
+        else wait(p.target,p.started,diagnosticTimeout());
+    }
+    auto e=event("COMMAND_THROTTLED");cJSON_AddNumberToObject(e,"targetNodeId",target);
+    cJSON_AddStringToObject(e,"nodeKey",nodeKey.c_str());cJSON_AddStringToObject(e,"command",command.c_str());
+    cJSON_AddStringToObject(e,"reason",same?"REQUEST_PENDING":"RADIO_BUSY");
+    const uint32_t remaining=same?same:first==UINT32_MAX?1000:first;
+    cJSON_AddNumberToObject(e,"remainingSec",std::max(1U,(remaining+999)/1000));publish(e);
+}
 void MvtWssGateway::airResult(const AirPoll &p,bool final,const char *code){
     auto e=event("AIR_SENSOR_RESULT");cJSON_AddNumberToObject(e,"targetNodeId",p.target);cJSON_AddStringToObject(e,"targetNodeHex",hex(p.target).c_str());cJSON_AddStringToObject(e,"nodeKey",p.nodeKey.c_str());
     cJSON_AddBoolToObject(e,"success",!p.values.empty());cJSON_AddBoolToObject(e,"final",final);cJSON_AddBoolToObject(e,"partial",!(p.environmentReceived&&p.airReceived));
@@ -837,7 +870,7 @@ void MvtWssGateway::airResult(const AirPoll &p,bool final,const char *code){
 }
 void MvtWssGateway::advanceAirPolls(){
     for(auto it=airPolls.begin();it!=airPolls.end();){
-        if(uint32_t(millis()-it->started)>=45000){airResult(*it,true,it->values.empty()?"AIR_SENSOR_NO_RESPONSE":"AIR_SENSOR_PARTIAL");it=airPolls.erase(it);continue;}
+        if(uint32_t(millis()-it->started)>=diagnosticTimeout()){airResult(*it,true,it->values.empty()?"AIR_SENSOR_NO_RESPONSE":"AIR_SENSOR_PARTIAL");it=airPolls.erase(it);continue;}
         if(moduleConfig.mqtt.enabled&&!authBlocked&&!inputFault&&authenticated&&socketConnected&&nowMs()&&it->sent<2&&int32_t(millis()-it->nextAt)>=0){
             auto *p=packet(it->target);
             if(!p){airResult(*it,true,"AIR_SENSOR_SEND_FAILED");it=airPolls.erase(it);continue;}
@@ -853,7 +886,7 @@ void MvtWssGateway::advanceAirPolls(){
 }
 void MvtWssGateway::advancePolls() {
     for (auto it = polls.begin(); it != polls.end();) {
-        if (uint32_t(millis() - it->command.started) >= ACK_TIMEOUT) {
+        if (uint32_t(millis() - it->command.started) >= diagnosticTimeout()) {
             if (!it->command.positionReceived && !it->command.telemetryReceived && !it->command.nodeInfoReceived)
                 finishDiagnostic(it->command, false);
             it = polls.erase(it); continue;
@@ -895,7 +928,7 @@ int32_t MvtWssGateway::runOnce() {
         configuredRoom = room; configuredKey = secret; configuredAddress = addr;
     }
     for (auto it = pending.begin(); it != pending.end();) {
-        if (uint32_t(millis() - it->started) >= ACK_TIMEOUT) {
+        if (uint32_t(millis() - it->started) >= (it->kind=="chat"||it->kind=="latechat"?ACK_TIMEOUT:diagnosticTimeout())) {
             if (it->kind == "chat") {
                 status(it->id, "UNCONFIRMED"); it->kind = "latechat"; ++it;
             } else if (it->kind == "latechat" && uint32_t(millis() - it->started) < 600000) ++it;
@@ -913,6 +946,7 @@ int32_t MvtWssGateway::runOnce() {
     }
     // A server ERROR can arrive immediately before a close event. Process it
     // before reconnect logic, so replacement/admin rejection cannot loop.
+    advanceAirPolls();advancePolls();
     char *text = nullptr;
     for (int i = 0; i < 8 && incoming && xQueueReceive(incoming, &text, 0) == pdTRUE; ++i) {
         handleIncomingCommand(text); free(text);
