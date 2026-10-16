@@ -293,7 +293,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setBool(p,"otaSupported",mvtOtaUpdater.supported());
     setString(p,"otaModel","heltec-v3");
     setNumber(p,"otaGeneration",MVT_OTA_GENERATION);
-    setString(p,"otaTransfer","wss-chunks-v1");
+    setString(p,"otaTransfer","wss-chunks-v2");
     return p;
 }
 void MvtWssGateway::sendAuthGateway() {
@@ -1056,6 +1056,6 @@ int32_t MvtWssGateway::runOnce() {
         if (!sendDocument(p.get())) break;
         outgoing.pop_front();
     }
-    return 100;
+    return mvtOtaUpdater.active()?10:100;
 }
 #endif

@@ -30,7 +30,7 @@ private:
     int lastState=-1,lastPercent=-1;
     uint32_t lastOffset=UINT32_MAX,lastStatusMs=0;
     std::atomic<uint32_t> downloadOffset{0},offeredOffset{UINT32_MAX};
-    struct Chunk {uint32_t offset;size_t length;uint8_t data[1024];};
+    struct Chunk {uint32_t offset;size_t length;uint8_t data[2048];};
     QueueHandle_t chunks=nullptr;
     std::string jobId,roomId,releaseId,version,hash,signature,error;
     uint32_t nodeId=0,generation=0,bytes=0,healthySince=0;

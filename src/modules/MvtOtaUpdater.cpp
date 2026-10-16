@@ -69,7 +69,7 @@ cJSON *MvtOtaUpdater::status(uint32_t id) const {
     return j;
 }
 bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t id){
-    if(active()||!supported()||std::string(text(command,"transfer"))!="wss-chunks-v1")return false;
+    if(active()||!supported()||std::string(text(command,"transfer"))!="wss-chunks-v2")return false;
     if(std::string(text(command,"roomId"))!=room||num(command,"nodeId")!=id)return false;
     const auto *m=cJSON_GetObjectItemCaseSensitive(command,"manifest");
     const std::string release=text(m,"releaseId"),v=text(m,"version"),h=text(m,"sha256"),imagePath=text(m,"imagePath"),job=text(command,"jobId");
@@ -98,10 +98,10 @@ bool MvtOtaUpdater::chunk(const cJSON *command){
     double offset=num(command,"offset");
     if(!integer(offset,0,bytes-1)||offset!=downloadOffset.load()||offeredOffset.load()==uint32_t(offset))return false;
     const char *data=text(command,"data");size_t encoded=strlen(data);
-    if(!encoded||encoded>1368)return false;
+    if(!encoded||encoded>2732)return false;
     Chunk incoming={};incoming.offset=uint32_t(offset);
     if(mbedtls_base64_decode(incoming.data,sizeof(incoming.data),&incoming.length,(const uint8_t *)data,encoded)!=0||
-       incoming.length!=std::min(size_t(1024),size_t(bytes-incoming.offset)))return false;
+       incoming.length!=std::min(size_t(2048),size_t(bytes-incoming.offset)))return false;
     // One bounded chunk in flight; duplicates never replace the next offset.
     offeredOffset=incoming.offset;
     if(xQueueSend(chunks,&incoming,0)!=pdPASS){offeredOffset=UINT32_MAX;return false;}
@@ -125,7 +125,9 @@ void MvtOtaUpdater::run(){
         std::string marker="MVTOTA1:heltec-v3:"+std::to_string(generation)+":"+version;marker.push_back('\0');
         std::string tail;bool markerFound=false;
         while(done<bytes){
-            if(uint32_t(millis()-started)>600000){why="DOWNLOAD_TIMEOUT";break;}
+            // Progress may continue on a slow link; the idle receive timeout
+            // below detects a stalled transfer independently of this hard cap.
+            if(uint32_t(millis()-started)>1800000){why="DOWNLOAD_TIMEOUT";break;}
             if(xQueueReceive(chunks,&incoming,pdMS_TO_TICKS(60000))!=pdPASS){why="WSS_DOWNLOAD_TIMEOUT";break;}
             if(incoming.offset!=done){why="CHUNK_OFFSET";break;}
             size_t n=incoming.length;
