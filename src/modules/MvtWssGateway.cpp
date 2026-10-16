@@ -1,6 +1,8 @@
 #include "configuration.h"
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtWssGateway.h"
+#include "modules/MvtOtaUpdater.h"
+#include "graphics/Screen.h"
 #include <cmath>
 #include "MvtPayload.h"
 #include "MvtRootCA.h"
@@ -147,6 +149,7 @@ MvtWssGateway::MvtWssGateway() : MeshModule("mvt_wss"), concurrency::OSThread("m
     mvtWssGateway = this;
     isPromiscuous = true; encryptedOk = false; loopbackOk = true;
     incoming = xQueueCreate(8, sizeof(char *));
+    mvtOtaUpdater.begin();
 }
 MvtWssGateway::~MvtWssGateway() {
     disconnectWs();
@@ -287,6 +290,9 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setBool(p, "hopLimitControl", true);
     setBool(p, "unifiedHopLimit", true);
     setBool(p, "diagnosticStatus", true);
+    setBool(p,"otaSupported",mvtOtaUpdater.supported());
+    setString(p,"otaModel","heltec-v3");
+    setNumber(p,"otaGeneration",MVT_OTA_GENERATION);
     return p;
 }
 void MvtWssGateway::sendAuthGateway() {
@@ -693,7 +699,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         authenticated = true; displayError = nullptr; snapshotPending = true;
         LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0;
         // The ACK provides server time even on devices without GPS/NTP.
-        sendHeartbeat(); return;
+        sendHeartbeat();if(mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));return;
     }
     if (type == "GATEWAY_HEARTBEAT_ACK") {
         double t = number(j.get(), "timestamp");
@@ -703,6 +709,17 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         return;
     }
     if (!authenticated || authBlocked) return;
+    if(type=="CMD_FIRMWARE_UPDATE"){
+        bool powered=powerStatus&&(powerStatus->getHasUSB()||powerStatus->getIsCharging()||
+            !powerStatus->getHasBattery()||powerStatus->getBatteryChargePercent()>=50);
+        if(!powered||!mvtOtaUpdater.start(j.get(),configuredRoom,nodeDB->getNodeNum())){
+            auto *e=event("FIRMWARE_UPDATE_STATE");setString(e,"jobId",str(j.get(),"jobId"));
+            setNumber(e,"nodeId",nodeDB->getNodeNum());setString(e,"state","failed");setNumber(e,"percent",0);
+            setString(e,"error",powered?"UPDATE_REJECTED":"LOW_POWER");publish(e);
+        }else if(screen){screen->setOn(true);screen->forceDisplay();}
+        return;
+    }
+    if(mvtOtaUpdater.active())return;
     if (type == "CMD_SET_WSS_HOP_LIMIT") {
         double hops = number(j.get(), "hopLimit");
         if (hops < 1 || hops > 7 || floor(hops) != hops) return;
@@ -969,6 +986,9 @@ void MvtWssGateway::advancePolls() {
     }
 }
 int32_t MvtWssGateway::runOnce() {
+    auto *radio=RadioLibInterface::instance;
+    mvtOtaUpdater.tick(authenticated&&socketConnected&&radio&&radio->getFreq()>0&&ESP.getFreeHeap()>32768);
+    if(mvtOtaUpdater.changed()&&authenticated&&mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));
     std::string room = moduleConfig.mqtt.username, secret = moduleConfig.mqtt.password, addr = moduleConfig.mqtt.address;
     if (room != configuredRoom || secret != configuredKey || addr != configuredAddress) {
         disconnectWs(); authBlocked = false; displayError = nullptr;
@@ -1002,7 +1022,8 @@ int32_t MvtWssGateway::runOnce() {
     advanceAirPolls();
     advancePolls();
     advanceSingles();
-    if(uint32_t(millis()-lastDiagnosticState)>=1000){sendDiagnosticStates();lastDiagnosticState=millis();}
+    if(uint32_t(millis()-lastDiagnosticState)>=1000){sendDiagnosticStates();lastDiagnosticState=millis();
+        if(mvtOtaUpdater.active()&&screen){screen->setOn(true);screen->forceDisplay();}}
     if (peerRejected) { authBlocked = true; if (!displayError) displayError = "BLOCK"; peerRejected = false; }
     if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked || inputFault) {
         if (wsClient) disconnectWs();

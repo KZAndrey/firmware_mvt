@@ -26,7 +26,7 @@ async function connect(url) {
   return {ws,messages,send:e=>ws.send(JSON.stringify(e))};
 }
 (async()=>{
-  let gateway, coord;
+  let gateway, coord, owner;
   try {
     const room=api.getOrCreateRoom('ROOM1','relay-secret','coord-secret','spec-secret',{ownerUid:'test-owner',name:'WSS Test'});
     room.state.wssHopLimit=2;
@@ -86,6 +86,10 @@ async function connect(url) {
     const visibleProgress=coord.messages.find(e=>e.type==='RADIO_COMMAND_STATE');
     assert.equal(visibleProgress.remainingMs,progress.remainingMs);assert.equal(visibleProgress.state,progress.state);
     coord.send({type:'CMD_SET_WSS_HOP_LIMIT',hopLimit:6});
+    await until(()=>coord.messages.some(e=>e.type==='ERROR'&&e.code==='PERMISSION_DENIED'));
+    owner=await connect(url);owner.send({type:'AUTH',room:'ROOM1',key:'relay-secret',token:token('test-owner')});
+    await until(()=>owner.messages.some(e=>e.type==='INIT_STATE'&&e.isOwner));
+    owner.send({type:'CMD_SET_WSS_HOP_LIMIT',hopLimit:6});
     await until(()=>gateway.messages.some(e=>e.type==='CMD_SET_WSS_HOP_LIMIT'));
     assert.equal(room.state.wssHopLimit,6);
     assert.equal(gateway.messages.find(e=>e.type==='CMD_SET_WSS_HOP_LIMIT').hopLimit,6);
@@ -111,7 +115,7 @@ async function connect(url) {
     assert(!gateway.messages.some(e=>e.type==='ERROR'),JSON.stringify(gateway.messages.filter(e=>e.type==='ERROR')));
     console.log('Real Relay WSS: auth, sanitized telemetry, live tracks, addressed chat, late ACK, diagnostic commands and clock ACK passed');
   } finally {
-    gateway?.ws.terminate();coord?.ws.terminate();
+    gateway?.ws.terminate();coord?.ws.terminate();owner?.ws.terminate();
     for(const r of api.rooms.values()) api.cancelQueuedRoomSave(r.id);
     for(const ws of api.wss.clients)ws.terminate();
     api.wss.close();await new Promise(resolve=>api.server.close(resolve));

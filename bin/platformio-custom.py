@@ -2,6 +2,7 @@
 # trunk-ignore-all(ruff/F821)
 # trunk-ignore-all(flake8/F821): For SConstruct imports
 import sys
+import os
 from os.path import join
 import subprocess
 import json
@@ -93,6 +94,17 @@ Import("projenv")
 
 prefsLoc = projenv["PROJECT_DIR"] + "/version.properties"
 verObj = readProps(prefsLoc)
+if env.get("PIOENV") == "heltec-v3":
+    verObj["long"] = "2.7.15.161026"
+    verObj["short"] = "2.7.15"
+    generation = int(os.environ.get("MVT_OTA_GENERATION", "1"))
+    if generation < 0 or generation > 2147483647:
+        raise ValueError("Invalid OTA generation")
+    ota_header = join(env["PROJECT_DIR"], "src/modules/MvtOtaGeneration.h")
+    ota_text = "#pragma once\n#define MVT_OTA_GENERATION " + str(generation) + "\n"
+    if not os.path.exists(ota_header) or open(ota_header).read() != ota_text:
+        with open(ota_header, "w") as ota_file:
+            ota_file.write(ota_text)
 print("Using meshtastic platformio-custom.py, firmware version " + verObj["long"] + " on " + env.get("PIOENV"))
 
 # get repository owner if git is installed

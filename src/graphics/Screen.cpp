@@ -67,6 +67,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #if HAS_MVT_WSS_GATEWAY
 #include "modules/MvtWssGateway.h"
 #include "graphics/MvtCompactScreen.h"
+#include "modules/MvtOtaUpdater.h"
 #include <time.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
@@ -100,8 +101,18 @@ using namespace meshtastic; /** @todo remove */
 namespace graphics
 {
 #if HAS_MVT_WSS_GATEWAY
+static bool drawMvtOta(OLEDDisplay *display,int16_t x,int16_t y){
+    if(!mvtOtaUpdater.active())return false;
+    display->setColor(WHITE);
+    const std::string s=mvtOtaUpdater.stage();
+    const char *label=s=="downloading"?"DOWNLOAD":s=="verifying"?"VERIFY":s=="installing"?"INSTALL":s=="restarting"?"RESTART":"CHECK BOOT";
+    mvtScreen::row(display,x,y+1,label);
+    mvtScreen::row(display,x,y+11,std::to_string(mvtOtaUpdater.progress())+"%");
+    display->drawRect(x,y+24,64,7);display->fillRect(x+1,y+25,62*mvtOtaUpdater.progress()/100,5);return true;
+}
 static void drawMvtStatus(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
+    if(drawMvtOta(display,x,y))return;
     display->setColor(WHITE);
     mvtScreen::row(display, x, y + 1, mvtScreen::roomLine(moduleConfig.mqtt.username, millis()));
     mvtScreen::row(display, x, y + 11, WiFi.status() == WL_CONNECTED ? "WIFI:OK" :
@@ -110,6 +121,7 @@ static void drawMvtStatus(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x,
 }
 static void drawMvtStats(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
+    if(drawMvtOta(display,x,y))return;
     display->setColor(WHITE);
     char battery[11];
     if (powerStatus && powerStatus->getHasBattery())
@@ -131,6 +143,7 @@ static void drawMvtStats(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, 
 }
 static void drawMvtNetwork(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
+    if(drawMvtOta(display,x,y))return;
     display->setColor(WHITE);
     mvtScreen::row(display, x, y + 1, mvtScreen::networkName(config.network.wifi_ssid, millis()));
     if (WiFi.status() != WL_CONNECTED) {
@@ -147,6 +160,7 @@ static void drawMvtNetwork(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x
 }
 static void drawMvtRadio(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
+    if(drawMvtOta(display,x,y))return;
     display->setColor(WHITE);
     mvtScreen::row(display, x, y + 1, mvtScreen::presetLine(mvtWssGateway ? mvtWssGateway->radioPresetName() : "UNKNOWN"));
     auto *radio = RadioLibInterface::instance;
@@ -155,6 +169,7 @@ static void drawMvtRadio(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, 
 }
 static void drawMvtMemory(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
+    if(drawMvtOta(display,x,y))return;
     display->setColor(WHITE);
     // Measure allocatable internal RAM, without counting PSRAM or instruction-only memory.
     multi_heap_info_t heap = {};
@@ -163,8 +178,19 @@ static void drawMvtMemory(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x,
     mvtScreen::row(display, x, y + 11, mvtScreen::memoryLine("MIN", heap.minimum_free_bytes));
     mvtScreen::row(display, x, y + 21, mvtScreen::memoryLine("BLOCK", heap.largest_free_block));
 }
+static void drawMvtFirmware(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
+{
+    if(drawMvtOta(display,x,y))return;
+    display->setColor(WHITE);
+    mvtScreen::row(display,x,y+1,"FIRMWARE V.");
+    const std::string version=xstr(APP_VERSION);
+    const size_t split=version.rfind('.');
+    mvtScreen::row(display,x,y+11,version.substr(0,split+1));
+    mvtScreen::row(display,x,y+21,version.substr(split+1));
+}
 static void drawMvtClock(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {
+    if(drawMvtOta(display,x,y))return;
     display->setColor(WHITE);
     // The 64-bit boot timer keeps uptime correct past the millis() rollover.
     const uint64_t seconds = esp_timer_get_time() / 1000000ULL;
@@ -1104,6 +1130,7 @@ void Screen::setFrames(FrameFocus focus)
         normalFrames[numframes++] = drawMvtNetwork;
         normalFrames[numframes++] = drawMvtRadio;
         normalFrames[numframes++] = drawMvtMemory;
+        normalFrames[numframes++] = drawMvtFirmware;
         fsi.positions.clock = numframes;
         normalFrames[numframes++] = drawMvtClock;
         moduleFrames.clear();
