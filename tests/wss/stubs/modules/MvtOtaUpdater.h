@@ -6,6 +6,7 @@ struct MvtOtaUpdater {
  void begin(){}
  bool supported()const{return false;}
  bool start(const cJSON *,const std::string &,uint32_t){return false;}
+ bool chunk(const cJSON *){return false;}
  void tick(bool){}
  bool changed(){return false;}
  bool active()const{return false;}

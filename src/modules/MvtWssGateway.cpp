@@ -293,6 +293,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setBool(p,"otaSupported",mvtOtaUpdater.supported());
     setString(p,"otaModel","heltec-v3");
     setNumber(p,"otaGeneration",MVT_OTA_GENERATION);
+    setString(p,"otaTransfer","wss-chunks-v1");
     return p;
 }
 void MvtWssGateway::sendAuthGateway() {
@@ -709,6 +710,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         return;
     }
     if (!authenticated || authBlocked) return;
+    if(type=="CMD_FIRMWARE_CHUNK"){mvtOtaUpdater.chunk(j.get());return;}
     if(type=="CMD_FIRMWARE_UPDATE"){
         bool powered=powerStatus&&(powerStatus->getHasUSB()||powerStatus->getIsCharging()||
             !powerStatus->getHasBattery()||powerStatus->getBatteryChargePercent()>=50);

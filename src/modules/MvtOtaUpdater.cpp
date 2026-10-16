@@ -2,11 +2,9 @@
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtOtaUpdater.h"
 #include "MvtOtaPublicKey.h"
-#include "MvtRootCA.h"
 #include "NodeDB.h"
 #include <Arduino.h>
 #include <Preferences.h>
-#include <esp_http_client.h>
 #include <esp_system.h>
 #include <freertos/timers.h>
 #include <mbedtls/base64.h>
@@ -56,17 +54,22 @@ void MvtOtaUpdater::begin(){
 bool MvtOtaUpdater::active() const {int s=state;return s>=Downloading&&s<=Checking;}
 const char *MvtOtaUpdater::stage() const {return names[state.load()];}
 void MvtOtaUpdater::fail(const char *why){error=why;state=Failed;}
-bool MvtOtaUpdater::changed(){int s=state.load(),p=percent.load();if(s==lastState&&p==lastPercent)return false;lastState=s;lastPercent=p;return true;}
+bool MvtOtaUpdater::changed(){
+    int s=state.load(),p=percent.load();uint32_t offset=downloadOffset.load(),now=millis();
+    if(s==lastState&&p==lastPercent&&offset==lastOffset&&(!active()||uint32_t(now-lastStatusMs)<5000))return false;
+    lastState=s;lastPercent=p;lastOffset=offset;lastStatusMs=now;return true;
+}
 cJSON *MvtOtaUpdater::status(uint32_t id) const {
     auto *j=cJSON_CreateObject();cJSON_AddStringToObject(j,"type","FIRMWARE_UPDATE_STATE");
     cJSON_AddStringToObject(j,"jobId",jobId.c_str());cJSON_AddNumberToObject(j,"nodeId",id);
     cJSON_AddStringToObject(j,"state",stage());cJSON_AddNumberToObject(j,"percent",percent.load());
+    if(state.load()==Downloading)cJSON_AddNumberToObject(j,"downloadOffset",downloadOffset.load());
     // error is written before the release-store to Failed; readers inspect it only then.
     if(state.load()==Failed)cJSON_AddStringToObject(j,"error",error.c_str());
     return j;
 }
 bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t id){
-    if(active()||!supported())return false;
+    if(active()||!supported()||std::string(text(command,"transfer"))!="wss-chunks-v1")return false;
     if(std::string(text(command,"roomId"))!=room||num(command,"nodeId")!=id)return false;
     const auto *m=cJSON_GetObjectItemCaseSensitive(command,"manifest");
     const std::string release=text(m,"releaseId"),v=text(m,"version"),h=text(m,"sha256"),imagePath=text(m,"imagePath"),job=text(command,"jobId");
@@ -81,9 +84,27 @@ bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t 
     jobId=job;roomId=room;nodeId=id;releaseId=release;version=v;hash=h;
     generation=uint32_t(num(m,"generation"));bytes=uint32_t(num(m,"size"));signature=text(m,"signature");
     if(signature.size()!=344)return false;
-    url="https://movetain.app"+imagePath;error.clear();percent=0;state=Verifying;
+    if(!chunks)chunks=xQueueCreate(1,sizeof(Chunk));
+    if(!chunks)return false;
+    xQueueReset(chunks);downloadOffset=0;offeredOffset=UINT32_MAX;
+    error.clear();percent=0;state=Verifying;
     TaskHandle_t handle=nullptr;
     if(xTaskCreate([](void *ctx){static_cast<MvtOtaUpdater *>(ctx)->run();vTaskDelete(nullptr);},"mvt-ota",12288,this,1,&handle)!=pdPASS){fail("TASK_MEMORY");return false;}
+    return true;
+}
+bool MvtOtaUpdater::chunk(const cJSON *command){
+    if(state.load()!=Downloading||std::string(text(command,"jobId"))!=jobId||
+       std::string(text(command,"roomId"))!=roomId||num(command,"nodeId")!=nodeId)return false;
+    double offset=num(command,"offset");
+    if(!integer(offset,0,bytes-1)||offset!=downloadOffset.load()||offeredOffset.load()==uint32_t(offset))return false;
+    const char *data=text(command,"data");size_t encoded=strlen(data);
+    if(!encoded||encoded>1368)return false;
+    Chunk incoming={};incoming.offset=uint32_t(offset);
+    if(mbedtls_base64_decode(incoming.data,sizeof(incoming.data),&incoming.length,(const uint8_t *)data,encoded)!=0||
+       incoming.length!=std::min(size_t(1024),size_t(bytes-incoming.offset)))return false;
+    // One bounded chunk in flight; duplicates never replace the next offset.
+    offeredOffset=incoming.offset;
+    if(xQueueSend(chunks,&incoming,0)!=pdPASS){offeredOffset=UINT32_MAX;return false;}
     return true;
 }
 void MvtOtaUpdater::run(){
@@ -96,27 +117,23 @@ void MvtOtaUpdater::run(){
     mbedtls_pk_free(&pk);if(!verified){fail("BAD_SIGNATURE");return;}
     const esp_partition_t *target=esp_ota_get_next_update_partition(nullptr);
     if(!target||bytes>target->size){fail("PARTITION_SIZE");return;}
-    esp_http_client_config_t cfg={};cfg.url=url.c_str();cfg.cert_pem=MVT_ROOT_CA;cfg.timeout_ms=10000;
-    cfg.disable_auto_redirect=true;cfg.buffer_size=2048;cfg.buffer_size_tx=1024;
-    auto http=esp_http_client_init(&cfg);if(!http){fail("HTTP_MEMORY");return;}
     esp_ota_handle_t ota=0;bool opened=false;const char *why=nullptr;
     do{
-        if(esp_http_client_open(http,0)!=ESP_OK){why="HTTPS_CONNECT";break;}
-        if(esp_http_client_fetch_headers(http)!=bytes||esp_http_client_get_status_code(http)!=200){why="HTTP_SIZE_STATUS";break;}
         if(esp_ota_begin(target,bytes,&ota)!=ESP_OK){why="OTA_BEGIN";break;}opened=true;state=Downloading;
         mbedtls_sha256_context sha;mbedtls_sha256_init(&sha);mbedtls_sha256_starts_ret(&sha,0);
-        uint8_t chunk[2048];uint32_t done=0,started=millis();
+        Chunk incoming={};uint32_t done=0,started=millis();
         std::string marker="MVTOTA1:heltec-v3:"+std::to_string(generation)+":"+version;marker.push_back('\0');
         std::string tail;bool markerFound=false;
         while(done<bytes){
-            if(uint32_t(millis()-started)>300000){why="DOWNLOAD_TIMEOUT";break;}
-            int n=esp_http_client_read(http,(char *)chunk,std::min(size_t(sizeof(chunk)),size_t(bytes-done)));
-            if(n<=0){why="DOWNLOAD_INTERRUPTED";break;}
-            mbedtls_sha256_update_ret(&sha,chunk,n);
-            std::string window=tail+std::string((char *)chunk,n);if(window.find(marker)!=std::string::npos)markerFound=true;
+            if(uint32_t(millis()-started)>600000){why="DOWNLOAD_TIMEOUT";break;}
+            if(xQueueReceive(chunks,&incoming,pdMS_TO_TICKS(60000))!=pdPASS){why="WSS_DOWNLOAD_TIMEOUT";break;}
+            if(incoming.offset!=done){why="CHUNK_OFFSET";break;}
+            size_t n=incoming.length;
+            mbedtls_sha256_update_ret(&sha,incoming.data,n);
+            std::string window=tail+std::string((char *)incoming.data,n);if(window.find(marker)!=std::string::npos)markerFound=true;
             tail=window.substr(window.size()>80?window.size()-80:0);
-            if(esp_ota_write(ota,chunk,n)!=ESP_OK){why="FLASH_WRITE";break;}
-            done+=n;percent=done*100/bytes;vTaskDelay(1);
+            if(esp_ota_write(ota,incoming.data,n)!=ESP_OK){why="FLASH_WRITE";break;}
+            done+=n;percent=done*100/bytes;downloadOffset=done;vTaskDelay(1);
         }
         mbedtls_sha256_finish_ret(&sha,digest);mbedtls_sha256_free(&sha);if(why)break;
         state=Verifying;char hex[65];for(int k=0;k<32;k++)sprintf(hex+k*2,"%02x",digest[k]);
@@ -135,7 +152,6 @@ void MvtOtaUpdater::run(){
         state=Restarting;
     }while(false);
     if(opened)esp_ota_abort(ota);
-    esp_http_client_cleanup(http);
     if(why){fail(why);return;}
     vTaskDelay(pdMS_TO_TICKS(2000));esp_restart();
 }
