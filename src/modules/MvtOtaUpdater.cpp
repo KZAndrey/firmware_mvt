@@ -2,6 +2,7 @@
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtOtaUpdater.h"
 #include "MvtOtaPublicKey.h"
+#include "MvtOtaMarker.h"
 #include "NodeDB.h"
 #include <Arduino.h>
 #include <Preferences.h>
@@ -122,8 +123,11 @@ void MvtOtaUpdater::run(){
         if(esp_ota_begin(target,bytes,&ota)!=ESP_OK){why="OTA_BEGIN";break;}opened=true;state=Downloading;
         mbedtls_sha256_context sha;mbedtls_sha256_init(&sha);mbedtls_sha256_starts_ret(&sha,0);
         Chunk incoming={};uint32_t done=0,started=millis();
-        std::string marker="MVTOTA1:heltec-v3:"+std::to_string(generation)+":"+version;marker.push_back('\0');
-        std::string tail;bool markerFound=false;
+        char marker[96];
+        int markerLength=snprintf(marker,sizeof(marker),"MVTOTA1:heltec-v3:%lu:%s",(unsigned long)generation,version.c_str());
+        MvtOtaMarker matcher(marker,markerLength>=0&&size_t(markerLength)<sizeof(marker)?size_t(markerLength)+1:0);
+        bool markerFound=false;
+        if(!matcher.valid()){mbedtls_sha256_free(&sha);why="IMAGE_GENERATION";break;}
         while(done<bytes){
             // Progress may continue on a slow link; the idle receive timeout
             // below detects a stalled transfer independently of this hard cap.
@@ -132,8 +136,7 @@ void MvtOtaUpdater::run(){
             if(incoming.offset!=done){why="CHUNK_OFFSET";break;}
             size_t n=incoming.length;
             mbedtls_sha256_update_ret(&sha,incoming.data,n);
-            std::string window=tail+std::string((char *)incoming.data,n);if(window.find(marker)!=std::string::npos)markerFound=true;
-            tail=window.substr(window.size()>80?window.size()-80:0);
+            markerFound=matcher.feed(incoming.data,n);
             if(esp_ota_write(ota,incoming.data,n)!=ESP_OK){why="FLASH_WRITE";break;}
             done+=n;percent=done*100/bytes;downloadOffset=done;vTaskDelay(1);
         }

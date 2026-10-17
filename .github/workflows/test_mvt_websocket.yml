@@ -4,11 +4,15 @@ on:
     paths:
       - 'src/platform/esp32/mvt_websocket_*'
       - 'tests/wss/websocket_poll_test.cpp'
+      - 'src/modules/MvtOta*'
+      - 'tests/wss/ota_marker_test.cpp'
       - '.github/workflows/test_mvt_websocket.yml'
   pull_request:
     paths:
       - 'src/platform/esp32/mvt_websocket_*'
       - 'tests/wss/websocket_poll_test.cpp'
+      - 'src/modules/MvtOta*'
+      - 'tests/wss/ota_marker_test.cpp'
       - '.github/workflows/test_mvt_websocket.yml'
 permissions:
   contents: read
@@ -22,3 +26,7 @@ jobs:
         run: g++ -std=c++14 -pthread -Wall -Wextra tests/wss/websocket_poll_test.cpp -o /tmp/wss-poll-test
       - name: Exercise simultaneous read/send failure and graceful close
         run: timeout 15s /tmp/wss-poll-test
+      - name: Verify streaming image marker without heap allocations
+        run: |
+          g++ -std=c++14 -Wall -Wextra tests/wss/ota_marker_test.cpp -o /tmp/ota-marker-test
+          /tmp/ota-marker-test
