@@ -50,11 +50,12 @@ private:
     };
     std::deque<AirPoll> airPolls;
     uint32_t diagnosticStep(uint32_t) const;
+    uint32_t diagnosticReply(uint32_t) const;
     uint32_t diagnosticTimeout(uint32_t = 0, unsigned = 1, bool = false) const;
     uint32_t nextDiagnosticAt = 0, lastDiagnosticState = 0, lastDiagnosticDispatch = 0, diagnosticGap = 0;
     bool diagnosticSlot() const;
     void advanceSingles();
-    void diagnosticState(uint32_t, const std::string &, const char *, uint32_t, bool);
+    void diagnosticState(uint32_t, const std::string &, const char *, uint32_t, bool, uint32_t = 45000, const char * = "");
     void sendDiagnosticStates();
     void commandThrottled(uint32_t, const std::string &, const std::string &);
     void retireReportedPolls(uint32_t);

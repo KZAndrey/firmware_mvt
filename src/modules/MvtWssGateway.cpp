@@ -1,6 +1,7 @@
 #include "configuration.h"
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtWssGateway.h"
+#include "MvtRadioTiming.h"
 #include "modules/MvtOtaUpdater.h"
 #include "graphics/Screen.h"
 #include <cmath>
@@ -496,7 +497,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
             const bool env=telemetry.which_variant==meshtastic_Telemetry_environment_metrics_tag;
             const bool air=telemetry.which_variant==meshtastic_Telemetry_air_quality_metrics_tag;
             const unsigned index=air?1:0;
-            if (from!=it->target || (!env&&!air) || it->sent<=index || (request&&request!=it->ids[index])) { ++it;continue; }
+            if (from!=it->target || (!env&&!air) || it->sent<=index || (!request&&std::count_if(airPolls.begin(),airPolls.end(),[from,index](const AirPoll &p){return p.target==from&&p.sent>index;})>1) || (request&&request!=it->ids[index])) { ++it;continue; }
             if(env){
                 it->environmentReceived=true;
                 const auto &m=telemetry.variant.environment_metrics;
@@ -811,7 +812,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
     if (type == "CMD_POLL_AIR") {
         if (!identifier(j.get(),"targetNodeId",target)||target<=1||target==NODENUM_BROADCAST||jsonBool(j.get(),"isVirtual"))return;
         retireReportedPolls(target);
-        if(airPolls.size()+polls.size()+std::count_if(pending.begin(),pending.end(),[](const Pending &p){return p.kind!="latechat";})>=MAX_PENDING||std::any_of(airPolls.begin(),airPolls.end(),[target](const AirPoll &p){return p.target==target;})||std::any_of(polls.begin(),polls.end(),[target](const Poll &p){return p.command.target==target;})||std::any_of(pending.begin(),pending.end(),[target](const Pending &p){return p.target==target&&p.kind!="chat"&&p.kind!="latechat";})){
+        if(airPolls.size()+polls.size()+std::count_if(pending.begin(),pending.end(),[](const Pending &p){return p.kind!="latechat";})>=MAX_PENDING||std::any_of(airPolls.begin(),airPolls.end(),[this,target](const AirPoll &p){return p.target==target&&uint32_t(millis()-p.started)<std::min(45000U,2*diagnosticStep(p.target));})||std::any_of(polls.begin(),polls.end(),[this,target](const Poll &p){return p.command.target==target&&uint32_t(millis()-p.command.started)<std::min(45000U,p.count*diagnosticStep(p.command.target));})||std::any_of(pending.begin(),pending.end(),[this,target](const Pending &p){return p.target==target&&p.kind!="chat"&&p.kind!="latechat"&&uint32_t(millis()-p.started)<diagnosticStep(p.target);})){
             commandThrottled(target,str(j.get(),"nodeKey",key(target).c_str()),type);return;
         }
         AirPoll poll;poll.target=target;poll.nodeKey=str(j.get(),"nodeKey",key(target).c_str());poll.started=millis();poll.nextAt=millis();
@@ -825,8 +826,8 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         std::string kind = type == "CMD_TRACEROUTE" ? "trace" : type == "CMD_POLL_ENV" ? "env" : "ping";
         retireReportedPolls(target);
         const size_t active = std::count_if(pending.begin(), pending.end(), [](const Pending &p) { return p.kind != "latechat"; });
-        if (active + polls.size() + airPolls.size() >= MAX_PENDING || std::any_of(airPolls.begin(),airPolls.end(),[target](const AirPoll &p){return p.target==target;}) || std::any_of(polls.begin(), polls.end(), [target](const Poll &p) { return p.command.target == target; }) || std::any_of(pending.begin(), pending.end(), [target](const Pending &p) {
-            return p.target == target && p.kind != "chat" && p.kind != "latechat";
+        if (active + polls.size() + airPolls.size() >= MAX_PENDING || std::any_of(airPolls.begin(),airPolls.end(),[this,target](const AirPoll &p){return p.target==target&&uint32_t(millis()-p.started)<std::min(45000U,2*diagnosticStep(p.target));}) || std::any_of(polls.begin(), polls.end(), [this,target](const Poll &p) { return p.command.target == target&&uint32_t(millis()-p.command.started)<std::min(45000U,p.count*diagnosticStep(p.command.target)); }) || std::any_of(pending.begin(), pending.end(), [this,target](const Pending &p) {
+            return p.target == target && p.kind != "chat" && p.kind != "latechat"&&uint32_t(millis()-p.started)<diagnosticStep(p.target);
         })) {
             commandThrottled(target,nodeKey,type);return;
         }
@@ -873,33 +874,44 @@ void MvtWssGateway::advanceSingles() {
         if(!transmit(p)){finishDiagnostic(*it,false);pending.erase(it);}return;
     }
 }
+static uint32_t mvtDiagnosticBase() {
+    if(!config.lora.use_preset)return 5500;
+    switch(config.lora.modem_preset){
+    case meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST:return 600;
+    case meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW:return 3000;
+    case meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW:return 500;
+    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_FAST:
+    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_SLOW:
+    case meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_FAST:
+    case meshtastic_Config_LoRaConfig_ModemPreset_SHORT_TURBO:return 350;
+    default:return 5500;
+    }
+}
 uint32_t MvtWssGateway::diagnosticStep(uint32_t target) const {
-    uint32_t base=!config.lora.use_preset?5500:
-        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_VERY_LONG_SLOW?5500:
-        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_LONG_SLOW?3000:
-        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST?600:
-        config.lora.modem_preset==meshtastic_Config_LoRaConfig_ModemPreset_MEDIUM_SLOW?500:350;
     auto *known=nodeDB->getMeshNode(target);
     unsigned hops=known&&known->has_hops_away?std::max(1U,unsigned(known->hops_away)):std::max(1U,unsigned(effectiveHopLimit()));
-    return std::min(25000U,std::max(3500U,base*std::min(hops,7U)*2+1500));
+    return mvtRadioSpacingMs(mvtDiagnosticBase(),hops);
+}
+uint32_t MvtWssGateway::diagnosticReply(uint32_t) const {
+    return mvtRadioReplyMs(mvtDiagnosticBase(),7);
 }
 uint32_t MvtWssGateway::diagnosticTimeout(uint32_t target,unsigned count,bool trace) const {
-    return trace?std::max(15000U,diagnosticStep(target)*2+1500):count*diagnosticStep(target)+1500;
+    return trace?diagnosticReply(target):(count-1)*diagnosticStep(target)+diagnosticReply(target);
 }
-void MvtWssGateway::diagnosticState(uint32_t target,const std::string &nodeKey,const char *state,uint32_t remaining,bool blocking) {
+void MvtWssGateway::diagnosticState(uint32_t target,const std::string &nodeKey,const char *state,uint32_t remaining,bool blocking,uint32_t cooldown,const char *command) {
     auto e=event("RADIO_COMMAND_STATE");cJSON_AddNumberToObject(e,"targetNodeId",target);
     cJSON_AddStringToObject(e,"nodeKey",nodeKey.c_str());cJSON_AddStringToObject(e,"state",state);
-    cJSON_AddNumberToObject(e,"remainingMs",remaining);cJSON_AddBoolToObject(e,"blocking",blocking);publish(e);
+    cJSON_AddStringToObject(e,"command",command);cJSON_AddNumberToObject(e,"remainingMs",remaining);cJSON_AddNumberToObject(e,"cooldownRemainingMs",std::min(45000U,cooldown));cJSON_AddBoolToObject(e,"blocking",blocking);publish(e);
 }
 void MvtWssGateway::sendDiagnosticStates() {
     auto remaining=[](uint32_t start,uint32_t timeout){uint32_t age=millis()-start;return age>=timeout?0:timeout-age;};
     uint32_t queued=diagnosticSlot()?2000:nextDiagnosticAt-millis()+2000;
     for(const auto &p:pending)if(p.kind!="chat"&&p.kind!="latechat")
-        diagnosticState(p.target,p.nodeKey,p.id?"waiting":"queued",p.id?remaining(p.started,p.timeout):queued,true);
+        diagnosticState(p.target,p.nodeKey,p.id?"waiting":"queued",p.id?remaining(p.started,p.timeout):queued,true,remaining(p.started,diagnosticStep(p.target)),p.kind=="trace"?"CMD_TRACEROUTE":"CMD_POLL_ENV");
     for(const auto &p:polls)diagnosticState(p.command.target,p.command.nodeKey,p.replies?"partial":p.sent?"waiting":"queued",
-        p.sent?remaining(p.command.started,p.command.timeout):queued,!p.replies);
+        p.sent?remaining(p.command.started,p.command.timeout):queued,!p.replies,remaining(p.command.started,std::min(45000U,p.count*diagnosticStep(p.command.target))),"CMD_PING_NODE");
     for(const auto &p:airPolls)diagnosticState(p.target,p.nodeKey,p.values.empty()?(p.sent?"waiting":"queued"):"partial",
-        p.sent?remaining(p.started,p.timeout):queued,p.values.empty());
+        p.sent?remaining(p.started,p.timeout):queued,p.values.empty(),remaining(p.started,std::min(45000U,2*diagnosticStep(p.target))),"CMD_POLL_AIR");
 }
 void MvtWssGateway::retireReportedPolls(uint32_t target) {
     for(auto it=polls.begin();it!=polls.end();) {
@@ -914,6 +926,7 @@ void MvtWssGateway::retireReportedPolls(uint32_t target) {
 void MvtWssGateway::commandThrottled(uint32_t target,const std::string &nodeKey,const std::string &command) {
     uint32_t same=0,first=UINT32_MAX;
     auto wait=[&](uint32_t node,uint32_t started,uint32_t timeout){
+        timeout=std::min(timeout,45000U);
         const uint32_t age=millis()-started,remaining=age>=timeout?0:timeout-age;
         first=std::min(first,remaining);if(node==target)same=std::max(same,remaining);
     };
@@ -953,7 +966,7 @@ void MvtWssGateway::advanceAirPolls(){
             p->decoded.payload.size=pb_encode_to_bytes(p->decoded.payload.bytes,sizeof(p->decoded.payload.bytes),&meshtastic_Telemetry_msg,&t);
             if(!it->sent)it->started=millis();
             it->ids[it->sent++]=p->id;it->nextAt=millis()+it->spacing;lastDiagnosticDispatch=millis();diagnosticGap=it->spacing;nextDiagnosticAt=it->nextAt;
-            it->timeout=uint32_t(millis()-it->started)+(3-it->sent)*it->spacing+1500;
+            it->timeout=uint32_t(millis()-it->started)+(2-it->sent)*it->spacing+diagnosticReply(it->target);
             if(!transmit(p)){airResult(*it,true,"AIR_SENSOR_SEND_FAILED");it=airPolls.erase(it);continue;}
         }
         ++it;
@@ -992,7 +1005,7 @@ void MvtWssGateway::advancePolls() {
             if(!it->sent)it->command.started=millis();
             it->ids[it->sent++] = id;
             it->nextAt = millis() + it->spacing;lastDiagnosticDispatch=millis();diagnosticGap=it->spacing;nextDiagnosticAt=it->nextAt;
-            it->command.timeout=uint32_t(millis()-it->command.started)+(it->count-it->sent+1)*it->spacing+1500;
+            it->command.timeout=uint32_t(millis()-it->command.started)+(it->count-it->sent)*it->spacing+diagnosticReply(it->command.target);
         }
         ++it;
     }
