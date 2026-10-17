@@ -19,6 +19,8 @@ Local changes:
 
 - Poll/read-error abort and the graceful-close poll share the existing recursive
   mutex with sends and receives. Polls use 20 ms to bound sender lock waits.
+- After releasing the mutex, the higher-priority receiver blocks for one tick.
+  `taskYIELD()` alone does not let a lower-priority sender acquire the mutex.
 - Task final close also holds that mutex. STOPPED is published after the final
   client access, and destroy waits for STOPPED even when `run` is already false.
 - Start sets `run` and clears STOPPED before scheduling the task, preventing an
@@ -29,3 +31,7 @@ Local changes:
 simultaneous send failure and read failure, reconnect state and graceful close.
 The gateway allows 1000 ms for a TLS write instead of 20 ms. A write failure still
 closes the connection and discards the partial frame; it is never treated as sent.
+Send-lock contention on a still-connected client retains the queued message for
+retry. It does not tear down the TLS session. Reconnect waits until the OTA worker
+has exited and uses the normal retry interval after client destruction, allowing
+FreeRTOS idle cleanup to reclaim the deleted task stacks before a new handshake.

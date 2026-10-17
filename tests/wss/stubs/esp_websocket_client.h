@@ -19,12 +19,14 @@ struct esp_websocket_client_config_t {
 };
 extern std::vector<std::string> testSent;
 extern bool testSendFailure;
+extern bool testSendBusy;
+inline bool esp_websocket_client_is_connected(void *) { return !testSendFailure; }
 inline void *esp_websocket_client_init(const esp_websocket_client_config_t *) { return reinterpret_cast<void *>(1); }
 inline int esp_websocket_client_start(void *) { return ESP_OK; }
 inline int esp_websocket_client_stop(void *) { return ESP_OK; }
 inline int esp_websocket_client_destroy(void *) { return ESP_OK; }
 inline int esp_websocket_register_events(void *, int, void (*)(void *, void *, int32_t, void *), void *) { return ESP_OK; }
 inline int esp_websocket_client_send_text(void *, const char *p, int len, int) {
-    if (testSendFailure) return -1;
+    if (testSendFailure || testSendBusy) return -1;
     testSent.emplace_back(p, len); return len;
 }

@@ -38,6 +38,8 @@ PowerStatus *powerStatus = &power;
 TestWiFi WiFi;
 std::vector<std::string> testSent;
 bool testSendFailure = false;
+bool testSendBusy = false;
+bool testOtaWorkerRunning = false;
 // Flash NodeDB serialization is outside this host adapter; wire protobufs
 // still use the actual generated 2.7.15 descriptors and nanopb implementation.
 bool meshtastic_NodeDatabase_callback(pb_istream_t *, pb_ostream_t *, const pb_field_t *) { return false; }
@@ -91,6 +93,8 @@ int main(int argc, char **argv) {
     meshtastic_NodeInfoLite peer = {}; peer.num = 0xaabbccdd; peer.channel = 2;
     peer.last_heard = 1700000000; peer.has_user = true; strcpy(peer.user.short_name, "A"); db.nodes.push_back(peer);
     MvtWssGateway g;
+    testOtaWorkerRunning=true;g.runOnce();CHECK(g.wsClient==nullptr);
+    testOtaWorkerRunning=false;
     g.runOnce(); CHECK(g.wsClient != nullptr); CHECK(!g.authenticated);
     g.socketConnected = true; g.runOnce(); CHECK(g.authSent);
     CHECK(std::string(sget(parse(testSent.back()).get(), "type")) == "AUTH_GATEWAY");
@@ -98,6 +102,14 @@ int main(int argc, char **argv) {
     frame(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}", 5); g.runOnce(); CHECK(g.authenticated);
     frame(g, "{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1791892800000}"); g.runOnce();
     CHECK(g.nowMs() == 1791892800000ULL); flush(g);
+    {
+        auto e=parse("{\"type\":\"TEST_CONTENTION\"}");
+        testSendBusy=true;CHECK(!g.sendDocument(e.get()));CHECK(!g.inputFault);CHECK(g.socketConnected);
+        testSendBusy=false;CHECK(g.sendDocument(e.get()));
+        testSendFailure=true;CHECK(!g.sendDocument(e.get()));CHECK(g.inputFault);
+        testSendFailure=false;g.inputFault=false;
+        testSent.pop_back();
+    }
     auto initialNode = lastEvent(g, "NODE_UPDATE");
     CHECK(nget(cJSON_GetObjectItem(initialNode.get(), "node"), "lastUpdateMs") == 1700000000000ULL);
     auto gateway = Json(g.gatewayInfo(), cJSON_Delete);

@@ -54,7 +54,15 @@ void MvtOtaUpdater::begin(){
 }
 bool MvtOtaUpdater::active() const {int s=state;return s>=Downloading&&s<=Checking;}
 const char *MvtOtaUpdater::stage() const {return names[state.load()];}
-void MvtOtaUpdater::fail(const char *why){error=why;state=Failed;}
+void MvtOtaUpdater::fail(const char *why){LOG_WARN("MVT OTA failed: %s",why);error=why;state=Failed;}
+void MvtOtaUpdater::onDisconnect(){
+    int s=state.load();
+    if((s!=Downloading&&s!=Verifying)||cancelRequested.exchange(true))return;
+    // Wake the download worker immediately, even when it is waiting for a
+    // chunk. Its stack/crypto resources must be released before reconnect TLS.
+    static const Chunk stop={UINT32_MAX,0,{}};
+    if(chunks)xQueueOverwrite(chunks,&stop);
+}
 bool MvtOtaUpdater::changed(){
     int s=state.load(),p=percent.load();uint32_t offset=downloadOffset.load(),now=millis();
     if(s==lastState&&p==lastPercent&&offset==lastOffset&&(!active()||uint32_t(now-lastStatusMs)<5000))return false;
@@ -70,7 +78,7 @@ cJSON *MvtOtaUpdater::status(uint32_t id) const {
     return j;
 }
 bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t id){
-    if(active()||!supported()||std::string(text(command,"transfer"))!="wss-chunks-v2")return false;
+    if(active()||workerRunning()||!supported()||std::string(text(command,"transfer"))!="wss-chunks-v2")return false;
     if(std::string(text(command,"roomId"))!=room||num(command,"nodeId")!=id)return false;
     const auto *m=cJSON_GetObjectItemCaseSensitive(command,"manifest");
     const std::string release=text(m,"releaseId"),v=text(m,"version"),h=text(m,"sha256"),imagePath=text(m,"imagePath"),job=text(command,"jobId");
@@ -88,9 +96,11 @@ bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t 
     if(!chunks)chunks=xQueueCreate(1,sizeof(Chunk));
     if(!chunks)return false;
     xQueueReset(chunks);downloadOffset=0;offeredOffset=UINT32_MAX;
-    error.clear();percent=0;state=Verifying;
+    error.clear();percent=0;cancelRequested=false;state=Verifying;
+    LOG_INFO("MVT OTA start bytes=%u heap=%u largest=%u",bytes,ESP.getFreeHeap(),ESP.getMaxAllocHeap());
     TaskHandle_t handle=nullptr;
-    if(xTaskCreate([](void *ctx){static_cast<MvtOtaUpdater *>(ctx)->run();vTaskDelete(nullptr);},"mvt-ota",12288,this,1,&handle)!=pdPASS){fail("TASK_MEMORY");return false;}
+    workerActive=true;
+    if(xTaskCreate([](void *ctx){auto *self=static_cast<MvtOtaUpdater *>(ctx);self->run();self->workerActive=false;vTaskDelete(nullptr);},"mvt-ota",12288,this,1,&handle)!=pdPASS){workerActive=false;fail("TASK_MEMORY");return false;}
     return true;
 }
 bool MvtOtaUpdater::chunk(const cJSON *command){
@@ -109,6 +119,7 @@ bool MvtOtaUpdater::chunk(const cJSON *command){
     return true;
 }
 void MvtOtaUpdater::run(){
+    if(cancelRequested){fail("WSS_DISCONNECTED");return;}
     std::string canonical="MVT-OTA-1\nheltec-v3\nesp32s3\n"+releaseId+"\n"+version+"\n"+std::to_string(generation)+"\n"+std::to_string(bytes)+"\n"+hash+"\n/firmware/heltec-v3/"+releaseId+".bin\n";
     uint8_t digest[32],sig[256];size_t sigLen=0;mbedtls_sha256_ret((const uint8_t *)canonical.data(),canonical.size(),digest,0);
     mbedtls_pk_context pk;mbedtls_pk_init(&pk);
@@ -116,11 +127,13 @@ void MvtOtaUpdater::run(){
       mbedtls_base64_decode(sig,sizeof(sig),&sigLen,(const uint8_t *)signature.data(),signature.size())==0&&sigLen==256&&
       mbedtls_pk_verify(&pk,MBEDTLS_MD_SHA256,digest,32,sig,sigLen)==0;
     mbedtls_pk_free(&pk);if(!verified){fail("BAD_SIGNATURE");return;}
+    if(cancelRequested){fail("WSS_DISCONNECTED");return;}
     const esp_partition_t *target=esp_ota_get_next_update_partition(nullptr);
     if(!target||bytes>target->size){fail("PARTITION_SIZE");return;}
     esp_ota_handle_t ota=0;bool opened=false;const char *why=nullptr;
     do{
         if(esp_ota_begin(target,bytes,&ota)!=ESP_OK){why="OTA_BEGIN";break;}opened=true;state=Downloading;
+        LOG_INFO("MVT OTA download heap=%u largest=%u",ESP.getFreeHeap(),ESP.getMaxAllocHeap());
         mbedtls_sha256_context sha;mbedtls_sha256_init(&sha);mbedtls_sha256_starts_ret(&sha,0);
         Chunk incoming={};uint32_t done=0,started=millis();
         char marker[96];
@@ -129,19 +142,24 @@ void MvtOtaUpdater::run(){
         bool markerFound=false;
         if(!matcher.valid()){mbedtls_sha256_free(&sha);why="IMAGE_GENERATION";break;}
         while(done<bytes){
+            if(cancelRequested){why="WSS_DISCONNECTED";break;}
             // Progress may continue on a slow link; the idle receive timeout
             // below detects a stalled transfer independently of this hard cap.
             if(uint32_t(millis()-started)>1800000){why="DOWNLOAD_TIMEOUT";break;}
             if(xQueueReceive(chunks,&incoming,pdMS_TO_TICKS(60000))!=pdPASS){why="WSS_DOWNLOAD_TIMEOUT";break;}
+            if(cancelRequested){why="WSS_DISCONNECTED";break;}
             if(incoming.offset!=done){why="CHUNK_OFFSET";break;}
             size_t n=incoming.length;
             mbedtls_sha256_update_ret(&sha,incoming.data,n);
             markerFound=matcher.feed(incoming.data,n);
             if(esp_ota_write(ota,incoming.data,n)!=ESP_OK){why="FLASH_WRITE";break;}
-            done+=n;percent=done*100/bytes;downloadOffset=done;vTaskDelay(1);
+            done+=n;unsigned nextPercent=done*100/bytes;
+            if(done==n||nextPercent/10!=percent.load()/10)LOG_INFO("MVT OTA progress=%u heap=%u largest=%u",nextPercent,ESP.getFreeHeap(),ESP.getMaxAllocHeap());
+            percent=nextPercent;downloadOffset=done;vTaskDelay(1);
         }
         mbedtls_sha256_finish_ret(&sha,digest);mbedtls_sha256_free(&sha);if(why)break;
         state=Verifying;char hex[65];for(int k=0;k<32;k++)sprintf(hex+k*2,"%02x",digest[k]);
+        if(cancelRequested){why="WSS_DISCONNECTED";break;}
         if(hash!=hex){why="IMAGE_HASH";break;}
         if(!markerFound){why="IMAGE_GENERATION";break;}
         esp_err_t ended=esp_ota_end(ota);opened=false;

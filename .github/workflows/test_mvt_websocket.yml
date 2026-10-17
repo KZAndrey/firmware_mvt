@@ -6,6 +6,7 @@ on:
       - 'tests/wss/websocket_poll_test.cpp'
       - 'src/modules/MvtOta*'
       - 'tests/wss/ota_marker_test.cpp'
+      - 'tests/ota/**'
       - '.github/workflows/test_mvt_websocket.yml'
   pull_request:
     paths:
@@ -13,6 +14,7 @@ on:
       - 'tests/wss/websocket_poll_test.cpp'
       - 'src/modules/MvtOta*'
       - 'tests/wss/ota_marker_test.cpp'
+      - 'tests/ota/**'
       - '.github/workflows/test_mvt_websocket.yml'
 permissions:
   contents: read
@@ -30,3 +32,13 @@ jobs:
         run: |
           g++ -std=c++14 -Wall -Wextra tests/wss/ota_marker_test.cpp -o /tmp/ota-marker-test
           /tmp/ota-marker-test
+      - uses: actions/checkout@v4
+        with:
+          repository: DaveGamble/cJSON
+          ref: v1.7.19
+          path: .tools/cjson
+      - name: Verify production OTA worker cancellation and resource cleanup
+        run: |
+          gcc -I.tools/cjson -c .tools/cjson/cJSON.c -o /tmp/mvt-cjson.o
+          g++ -std=c++14 -Wall -Wextra -Itests/ota/stubs -I.tools/cjson -Isrc tests/ota/cancellation_test.cpp src/modules/MvtOtaUpdater.cpp /tmp/mvt-cjson.o -o /tmp/ota-cancellation-test
+          timeout 15s /tmp/ota-cancellation-test

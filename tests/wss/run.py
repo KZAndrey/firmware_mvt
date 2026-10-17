@@ -36,11 +36,18 @@ with (build / 'compile.log').open('w', encoding='utf-8') as log:
         obj = build / (src.stem + '.o')
         subprocess.run([zig, 'cc', *flags, '-c', str(src), '-o', str(obj)], env=env, stdout=log, stderr=log, check=True)
         objects.append(str(obj))
+    cancellation_test = build / 'ota_cancellation_test.exe'
+    subprocess.run([zig, 'c++', '-target', 'x86_64-windows-gnu', '-O0', '-g0',
+                    '-Itests/ota/stubs', '-Isrc', '-I' + str(cjson), '-std=c++14',
+                    'tests/ota/cancellation_test.cpp', 'src/modules/MvtOtaUpdater.cpp',
+                    str(build / 'cJSON.o'), '-o', str(cancellation_test)],
+                   env=env, stdout=log, stderr=log, check=True)
     generated = [str(p) for p in (root / 'src/mesh/generated/meshtastic').glob('*.cpp')]
     exe = build / 'gateway_test.exe'
     subprocess.run([zig, 'c++', *flags, '-std=c++11', 'tests/wss/gateway_test.cpp',
                     'src/modules/MvtWssGateway.cpp', *generated, *objects, '-o', str(exe)],
                    env=env, stdout=log, stderr=log, check=True)
+subprocess.run([str(cancellation_test)], check=True)
 subprocess.run(['node', 'tests/wss/portal-vectors.js', args.relay, str(build / 'vectors.jsonl')], check=True)
 subprocess.run([str(exe), str(build / 'vectors.jsonl'), str(build / 'transcript.jsonl'), str(build)], check=True)
 subprocess.run(['node', 'tests/wss/portal-contract.js', args.relay, str(build / 'transcript.jsonl')], check=True)

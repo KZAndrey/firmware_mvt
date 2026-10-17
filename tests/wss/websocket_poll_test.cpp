@@ -11,7 +11,13 @@ enum { WEBSOCKET_STATE_UNKNOW, WEBSOCKET_STATE_CONNECTED, WEBSOCKET_STATE_WAIT_T
        WEBSOCKET_STATE_CLOSING, CLOSE_FRAME_SENT_BIT = 8, WEBSOCKET_EVENT_CLOSED = 9 };
 const int portMAX_DELAY = -1;
 #define ESP_LOGE(...) ((void)0)
-#define taskYIELD() std::this_thread::yield()
+thread_local int lockDepth=0;
+std::atomic<unsigned> schedulerBlocks{0};
+void vTaskDelay(int ticks) {
+    assert(ticks>0&&lockDepth==0); // lower-priority sender must run outside lock
+    ++schedulerBlocks;
+    std::this_thread::sleep_for(std::chrono::milliseconds(ticks));
+}
 struct Client {
     std::recursive_mutex *lock;
     bool run = true;
@@ -19,8 +25,8 @@ struct Client {
     int transport = 1, status_bits = CLOSE_FRAME_SENT_BIT;
 };
 using esp_websocket_client_handle_t = Client *;
-void xSemaphoreTakeRecursive(std::recursive_mutex *m, int) { m->lock(); }
-void xSemaphoreGiveRecursive(std::recursive_mutex *m) { m->unlock(); }
+void xSemaphoreTakeRecursive(std::recursive_mutex *m, int) { m->lock();++lockDepth; }
+void xSemaphoreGiveRecursive(std::recursive_mutex *m) { --lockDepth;m->unlock(); }
 int xEventGroupGetBits(int bits) { return bits; }
 std::mutex gate;
 std::condition_variable changed;
@@ -87,5 +93,6 @@ int main() {
     assert(lock.try_lock()); lock.unlock(); // every close path releases the mutex
     c.run = false; c.state = WEBSOCKET_STATE_CONNECTED;
     assert(mvt_websocket_poll(&c, &readable) && polls == 2);
-    puts("WSS concurrent read/send failure and close lifecycle: PASS");
+    assert(schedulerBlocks>=6);
+    puts("WSS concurrent failure, close lifecycle and lower-priority sender scheduling: PASS");
 }

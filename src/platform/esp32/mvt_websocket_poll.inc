@@ -22,7 +22,9 @@ static bool mvt_websocket_poll(esp_websocket_client_handle_t client, int *read_s
         }
     }
     xSemaphoreGiveRecursive(client->lock);
-    // Give a waiting sender a scheduling opportunity before taking the lock again.
-    taskYIELD();
+    // A yield only schedules equal-priority tasks in FreeRTOS. This task has
+    // higher priority than the gateway sender: block for a tick so a sender
+    // awakened by the mutex release can actually acquire it.
+    vTaskDelay(1);
     return keep_running;
 }

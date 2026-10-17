@@ -15,6 +15,8 @@ public:
     void begin();
     bool start(const cJSON *,const std::string &,uint32_t);
     bool chunk(const cJSON *);
+    void onDisconnect();
+    bool workerRunning() const { return workerActive.load(); }
     void tick(bool healthy);
     cJSON *status(uint32_t) const;
     bool active() const;
@@ -27,6 +29,8 @@ private:
     enum State {Idle,Downloading,Verifying,Installing,Restarting,Checking,Updated,RolledBack,Failed};
     std::atomic<int> state{Idle};
     std::atomic<unsigned> percent{0};
+    std::atomic<bool> cancelRequested{false};
+    std::atomic<bool> workerActive{false};
     int lastState=-1,lastPercent=-1;
     uint32_t lastOffset=UINT32_MAX,lastStatusMs=0;
     std::atomic<uint32_t> downloadOffset{0},offeredOffset{UINT32_MAX};

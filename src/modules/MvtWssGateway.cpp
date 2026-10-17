@@ -212,8 +212,12 @@ void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
     }
 }
 void MvtWssGateway::disconnectWs() {
+    mvtOtaUpdater.onDisconnect();
     if (wsClient) {
         esp_websocket_client_stop(wsClient); esp_websocket_client_destroy(wsClient); wsClient = nullptr;
+        // FreeRTOS reclaims deleted task stacks in the idle task. Keep the
+        // normal reconnect interval after teardown so old TLS/OTA tasks finish.
+        lastConnectAttemptMs = millis();
     }
     socketConnected = false; authenticated = false; authSent = false;
     snapshot.clear();
@@ -222,7 +226,9 @@ void MvtWssGateway::disconnectWs() {
     while (incoming && xQueueReceive(incoming, &p, 0) == pdTRUE) free(p);
 }
 void MvtWssGateway::connectWs() {
-    disconnectWs();
+    if (wsClient) { disconnectWs(); return; }
+    if (mvtOtaUpdater.workerRunning()) return;
+    LOG_INFO("MVT WSS connect heap=%u largest=%u",ESP.getFreeHeap(),ESP.getMaxAllocHeap());
     std::string url = configuredAddress.empty() ? "wss://movetain.app/ws" : configuredAddress;
     if (url.find("://") == std::string::npos) url = "wss://" + url;
     size_t hostEnd = url.find('/', url.find("://") + 3);
@@ -243,6 +249,10 @@ bool MvtWssGateway::sendDocument(cJSON *p) {
     std::string text = serialize(p);
     if (!socketConnected || !wsClient || inputFault || text.empty()) return false;
     int written = esp_websocket_client_send_text(wsClient, text.c_str(), text.size(), pdMS_TO_TICKS(1000));
+    // The SDK returns -1 if it cannot acquire the send mutex, without writing
+    // any frame bytes. A transport write failure aborts the SDK connection.
+    // Retain queued messages on contention instead of tearing down healthy TLS.
+    if (written < 0 && esp_websocket_client_is_connected(wsClient)) return false;
     // Do not keep writing on a potentially partial websocket frame.
     if (written != int(text.size())) inputFault = true;
     return written == int(text.size());
@@ -1033,6 +1043,8 @@ int32_t MvtWssGateway::runOnce() {
         return 1000;
     }
     if (!socketConnected) {
+        mvtOtaUpdater.onDisconnect();
+        if(mvtOtaUpdater.workerRunning())return 100;
         authenticated = false; authSent = false;
         if (uint32_t(millis() - lastConnectAttemptMs) > 15000) { lastConnectAttemptMs = millis(); connectWs(); }
         return 100;
