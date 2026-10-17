@@ -1,2 +1,2 @@
 #pragma once
-#define MVT_OTA_GENERATION 10
+#define MVT_OTA_GENERATION 11
