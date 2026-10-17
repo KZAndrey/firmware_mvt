@@ -242,7 +242,7 @@ void MvtWssGateway::connectWs() {
 bool MvtWssGateway::sendDocument(cJSON *p) {
     std::string text = serialize(p);
     if (!socketConnected || !wsClient || inputFault || text.empty()) return false;
-    int written = esp_websocket_client_send_text(wsClient, text.c_str(), text.size(), pdMS_TO_TICKS(20));
+    int written = esp_websocket_client_send_text(wsClient, text.c_str(), text.size(), pdMS_TO_TICKS(1000));
     // Do not keep writing on a potentially partial websocket frame.
     if (written != int(text.size())) inputFault = true;
     return written == int(text.size());

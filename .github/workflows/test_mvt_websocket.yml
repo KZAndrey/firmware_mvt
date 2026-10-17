@@ -1,0 +1,24 @@
+name: MOVETAIN WebSocket lifetime regression
+on:
+  push:
+    paths:
+      - 'src/platform/esp32/mvt_websocket_*'
+      - 'tests/wss/websocket_poll_test.cpp'
+      - '.github/workflows/test_mvt_websocket.yml'
+  pull_request:
+    paths:
+      - 'src/platform/esp32/mvt_websocket_*'
+      - 'tests/wss/websocket_poll_test.cpp'
+      - '.github/workflows/test_mvt_websocket.yml'
+permissions:
+  contents: read
+jobs:
+  concurrent-failure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production poll helper regression
+        run: g++ -std=c++14 -pthread -Wall -Wextra tests/wss/websocket_poll_test.cpp -o /tmp/wss-poll-test
+      - name: Exercise simultaneous read/send failure and graceful close
+        run: timeout 15s /tmp/wss-poll-test
