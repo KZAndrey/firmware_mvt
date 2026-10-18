@@ -95,9 +95,9 @@ Import("projenv")
 prefsLoc = projenv["PROJECT_DIR"] + "/version.properties"
 verObj = readProps(prefsLoc)
 if env.get("PIOENV") == "heltec-v3":
-    verObj["long"] = "2.7.15.1710"
+    verObj["long"] = "2.7.15.1810"
     verObj["short"] = "2.7.15"
-    generation = int(os.environ.get("MVT_OTA_GENERATION", "12"))
+    generation = int(os.environ.get("MVT_OTA_GENERATION", "13"))
     if generation < 0 or generation > 2147483647:
         raise ValueError("Invalid OTA generation")
     ota_header = join(env["PROJECT_DIR"], "src/modules/MvtOtaGeneration.h")

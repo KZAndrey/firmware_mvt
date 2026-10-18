@@ -66,6 +66,9 @@ private:
     esp_websocket_client_handle_t wsClient = nullptr;
     QueueHandle_t incoming = nullptr;
     volatile bool socketConnected = false, inputFault = false, peerRejected = false;
+    volatile bool connectionEnded = false;
+    bool connecting = false;
+    uint32_t connectStartedMs = 0, lastServerAckMs = 0;
     bool authenticated = false, authSent = false, authBlocked = false;
     bool snapshotPending = false;
     const char *displayError = nullptr;

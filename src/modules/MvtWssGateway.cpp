@@ -179,7 +179,10 @@ void MvtWssGateway::handleWsEvent(void *args, esp_event_base_t, int32_t id, void
     auto *self = static_cast<MvtWssGateway *>(args);
     if (!self) return;
     if (id == WEBSOCKET_EVENT_CONNECTED) self->socketConnected = true;
-    else if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED) self->socketConnected = false;
+    else if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED) {
+        self->socketConnected = false;
+        self->connectionEnded = true;
+    }
     else if (id == WEBSOCKET_EVENT_DATA && data) self->receiveFrame(*static_cast<esp_websocket_event_data_t *>(data));
 }
 void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
@@ -221,6 +224,7 @@ void MvtWssGateway::disconnectWs() {
         lastConnectAttemptMs = millis();
     }
     socketConnected = false; authenticated = false; authSent = false;
+    connecting = false; connectionEnded = false; lastServerAckMs = 0;
     snapshot.clear();
     frame.clear(); frameExpected = 0; inputFault = false;
     char *p;
@@ -240,9 +244,11 @@ void MvtWssGateway::connectWs() {
     cfg.uri = url.c_str(); cfg.cert_pem = MVT_ROOT_CA;
     cfg.task_stack = 6144; cfg.buffer_size = 2048;
     cfg.ping_interval_sec = 20; cfg.pingpong_timeout_sec = 45;
+    cfg.network_timeout_ms = 10000;
     cfg.disable_auto_reconnect = true;
     wsClient = esp_websocket_client_init(&cfg);
     if (!wsClient) return;
+    connecting = true; connectStartedMs = millis(); connectionEnded = false;
     esp_websocket_register_events(wsClient, WEBSOCKET_EVENT_ANY, handleWsEvent, this);
     if (esp_websocket_client_start(wsClient) != ESP_OK) disconnectWs();
 }
@@ -708,7 +714,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
     if (type == "AUTH_GATEWAY_SUCCESS") {
         // The persisted device setting is authoritative on reconnect.
         if (!authSent) return;
-        authenticated = true; displayError = nullptr; snapshotPending = true;
+        authenticated = true; displayError = nullptr; snapshotPending = true; lastServerAckMs = millis();
         LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0;
         // The ACK provides server time even on devices without GPS/NTP.
         sendHeartbeat();if(mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));return;
@@ -716,6 +722,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
     if (type == "GATEWAY_HEARTBEAT_ACK") {
         double t = number(j.get(), "timestamp");
         if (authenticated && t >= 1577836800000.0 && t < 4102444800000.0) {
+            lastServerAckMs = millis();
             serverTimeMs = uint64_t(t); serverTimeTick = millis();
         }
         return;
@@ -1059,8 +1066,23 @@ int32_t MvtWssGateway::runOnce() {
         mvtOtaUpdater.onDisconnect();
         if(mvtOtaUpdater.workerRunning())return 100;
         authenticated = false; authSent = false;
+        if (wsClient) {
+            // Do not repeatedly destroy a TLS handshake just because the retry
+            // interval elapsed. A closed client, however, must be retired now.
+            if (connectionEnded || !connecting || uint32_t(millis()-connectStartedMs)>=30000) {
+                LOG_WARN("MVT WSS retire ended=%d connecting=%d age=%u heap=%u largest=%u",int(connectionEnded),int(connecting),unsigned(millis()-connectStartedMs),ESP.getFreeHeap(),ESP.getMaxAllocHeap());
+                disconnectWs();
+            }
+            return 100;
+        }
         if (uint32_t(millis() - lastConnectAttemptMs) > 15000) { lastConnectAttemptMs = millis(); connectWs(); }
         return 100;
+    }
+    connecting = false;
+    if (connectionEnded || (wsClient && !esp_websocket_client_is_connected(wsClient)) ||
+        (authenticated && uint32_t(millis()-lastServerAckMs)>=75000)) {
+        LOG_WARN("MVT WSS unhealthy ackAge=%u heap=%u largest=%u",unsigned(millis()-lastServerAckMs),ESP.getFreeHeap(),ESP.getMaxAllocHeap());
+        disconnectWs(); return 100;
     }
     if (!authSent) sendAuthGateway();
     if (!authenticated) {

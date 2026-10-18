@@ -40,6 +40,7 @@ std::vector<std::string> testSent;
 bool testSendFailure = false;
 bool testSendBusy = false;
 bool testOtaWorkerRunning = false;
+int testWsCreated = 0, testWsDestroyed = 0;
 // Flash NodeDB serialization is outside this host adapter; wire protobufs
 // still use the actual generated 2.7.15 descriptors and nanopb implementation.
 bool meshtastic_NodeDatabase_callback(pb_istream_t *, pb_ostream_t *, const pb_field_t *) { return false; }
@@ -55,8 +56,9 @@ void frame(MvtWssGateway &g, const std::string &s, size_t chunk = 2048) {
         g.receiveFrame(d);
     }
 }
+void healthyTick(MvtWssGateway &g);
 void flush(MvtWssGateway &g) {
-    for (int i = 0; i < 100 && (!g.outgoing.empty() || g.snapshotPending); ++i) g.runOnce();
+    for (int i = 0; i < 100 && (!g.outgoing.empty() || g.snapshotPending); ++i) healthyTick(g);
 }
 Json lastEvent(MvtWssGateway &g, const char *type) {
     flush(g);
@@ -84,7 +86,11 @@ void command(MvtWssGateway &g, const char *text) {
     bool queued=std::any_of(g.pending.begin(),g.pending.end(),[](const MvtWssGateway::Pending &p){return !p.id;}) ||
         std::any_of(g.polls.begin(),g.polls.end(),[](const MvtWssGateway::Poll &p){return !p.sent;}) ||
         std::any_of(g.airPolls.begin(),g.airPolls.end(),[](const MvtWssGateway::AirPoll &p){return !p.sent;});
-    if(queued&&!g.diagnosticSlot()){testMillis=g.nextDiagnosticAt;g.runOnce();}
+    if(queued&&!g.diagnosticSlot()){testMillis=g.nextDiagnosticAt;healthyTick(g);}
+}
+void healthyTick(MvtWssGateway &g) {
+    if(g.authenticated)g.handleIncomingCommand("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}");
+    g.runOnce();
 }
 int main(int argc, char **argv) {
     config.lora.tx_enabled = true; config.lora.hop_limit = 4; config.lora.use_preset=true; config.lora.modem_preset=meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST; moduleConfig.mqtt.enabled = true;
@@ -93,14 +99,14 @@ int main(int argc, char **argv) {
     meshtastic_NodeInfoLite peer = {}; peer.num = 0xaabbccdd; peer.channel = 2;
     peer.last_heard = 1700000000; peer.has_user = true; strcpy(peer.user.short_name, "A"); db.nodes.push_back(peer);
     MvtWssGateway g;
-    testOtaWorkerRunning=true;g.runOnce();CHECK(g.wsClient==nullptr);
+    testOtaWorkerRunning=true;healthyTick(g);CHECK(g.wsClient==nullptr);
     testOtaWorkerRunning=false;
-    g.runOnce(); CHECK(g.wsClient != nullptr); CHECK(!g.authenticated);
-    g.socketConnected = true; g.runOnce(); CHECK(g.authSent);
+    healthyTick(g); CHECK(g.wsClient != nullptr); CHECK(!g.authenticated);
+    g.socketConnected = true; healthyTick(g); CHECK(g.authSent);
     CHECK(std::string(sget(parse(testSent.back()).get(), "type")) == "AUTH_GATEWAY");
     command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":42,\"text\":\"blocked\"}"); CHECK(radio.sent.empty());
-    frame(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}", 5); g.runOnce(); CHECK(g.authenticated);
-    frame(g, "{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1791892800000}"); g.runOnce();
+    frame(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}", 5); healthyTick(g); CHECK(g.authenticated);
+    frame(g, "{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1791892800000}"); healthyTick(g);
     CHECK(g.nowMs() == 1791892800000ULL); flush(g);
     {
         auto e=parse("{\"type\":\"TEST_CONTENTION\"}");
@@ -153,7 +159,7 @@ int main(int argc, char **argv) {
     CHECK(radio.sent.size() == count); CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "FAILED");
     // Timeout is unconfirmed; a late target ACK can still prove delivery.
     command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":47,\"recipientId\":2864434397,\"text\":\"late\"}");
-    testMillis += 120001; g.runOnce();
+    testMillis += 120001; healthyTick(g);
     CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "UNCONFIRMED");
     ack(g, 0xaabbccdd, 47); CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "DELIVERED");
     // Dispatch failure is not delivery.
@@ -169,7 +175,7 @@ int main(int argc, char **argv) {
     const size_t beforeThrottle = radio.sent.size();
     command(g, "{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}");
     CHECK(radio.sent.size() == beforeThrottle);
-    testMillis += g.polls.front().spacing; g.runOnce(); sent = radio.sent.back();
+    testMillis += g.polls.front().spacing; healthyTick(g); sent = radio.sent.back();
     CHECK(sent.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP && sent.id != positionId);
     meshtastic_Telemetry t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_device_metrics_tag;
     t.variant.device_metrics.has_battery_level = true; t.variant.device_metrics.battery_level = 66;
@@ -185,7 +191,7 @@ int main(int argc, char **argv) {
     position.latitude_i = 499400000; position.longitude_i = 826100000;
     p = incoming(0xaabbccdd, positionId, meshtastic_PortNum_POSITION_APP);
     p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_Position_msg, &position);
-    g.handleReceived(p); g.runOnce(); CHECK(g.polls.empty());
+    g.handleReceived(p); healthyTick(g); CHECK(g.polls.empty());
     auto node = lastEvent(g, "NODE_UPDATE");
     CHECK(nget(cJSON_GetObjectItem(node.get(), "node"), "lat") == 49.94);
     // Empty GPS reply does not delete the last known location.
@@ -198,11 +204,11 @@ int main(int argc, char **argv) {
     // Unknown node gets three requests with independent IDs.
     command(g, "{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":1234567}");
     CHECK(radio.sent.back().decoded.portnum == meshtastic_PortNum_NODEINFO_APP);
-    testMillis += g.polls.front().spacing; g.runOnce();
+    testMillis += g.polls.front().spacing; healthyTick(g);
     CHECK(radio.sent.back().decoded.portnum == meshtastic_PortNum_POSITION_APP);
-    testMillis += g.polls.front().spacing; g.runOnce();
+    testMillis += g.polls.front().spacing; healthyTick(g);
     CHECK(radio.sent.back().decoded.portnum == meshtastic_PortNum_TELEMETRY_APP);
-    testMillis += 120001; g.runOnce(); CHECK(g.polls.empty());
+    testMillis += 120001; healthyTick(g); CHECK(g.polls.empty());
     command(g, "{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
     t = meshtastic_Telemetry_init_default; t.which_variant = meshtastic_Telemetry_environment_metrics_tag;
     t.variant.environment_metrics.has_temperature = true; t.variant.environment_metrics.temperature = -12.5;
@@ -295,12 +301,12 @@ int main(int argc, char **argv) {
     command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\",\"wssHopLimit\":3}"); CHECK(g.effectiveHopLimit() == 6);
     hopPacket = g.packet(0xaabbccdd); CHECK(hopPacket->hop_limit == 6); packetPool.release(hopPacket);
     std::string padded = "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":99,\"text\":\"chunked\",\"padding\":\"" + std::string(5000, 'a') + "\"}";
-    count = radio.sent.size(); frame(g, padded, 111); CHECK(radio.sent.size() == count); g.runOnce(); CHECK(radio.sent.size() == count + 1);
+    count = radio.sent.size(); frame(g, padded, 111); CHECK(radio.sent.size() == count); healthyTick(g); CHECK(radio.sent.size() == count + 1);
     esp_websocket_event_data_t d = {"ping", 4, 9, nullptr, nullptr, 4, 0}; g.receiveFrame(d); CHECK(!g.inputFault);
     d = {"bad", 3, 1, nullptr, nullptr, 3, 1}; g.receiveFrame(d); CHECK(g.inputFault);
     g.inputFault = false;
     frame(g, "{\"type\":\"ERROR\",\"code\":\"GATEWAY_REPLACED\"}");
-    g.socketConnected = false; g.runOnce(); CHECK(g.authBlocked); CHECK(!g.socketConnected);
+    g.socketConnected = false; healthyTick(g); CHECK(g.authBlocked); CHECK(!g.socketConnected);
     CHECK(std::string(g.displayStatus()) == "TAKEN");
     command(g, "{\"type\":\"ERROR\",\"code\":\"INVALID_RELAY_KEY\"}"); CHECK(std::string(g.displayStatus()) == "BADKEY");
     command(g, "{\"type\":\"ERROR\",\"code\":\"ROOM_NOT_FOUND\"}"); CHECK(std::string(g.displayStatus()) == "NOROOM");
@@ -420,9 +426,9 @@ int main(int argc, char **argv) {
         adaptive.handleIncomingCommand("{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}");
         CHECK(radio.sent.size()==before+1);CHECK(adaptive.polls.front().sent==0);
         auto state=lastEvent(adaptive,"RADIO_COMMAND_STATE");CHECK(std::string(sget(state.get(),"state"))=="queued");
-        testMillis=start+2999;adaptive.runOnce();CHECK(radio.sent.size()==before+1);
-        testMillis=start+3000;adaptive.runOnce();CHECK(radio.sent.size()==before+2);CHECK(adaptive.polls.front().sent==1);
-        testMillis=start+120001;adaptive.runOnce();CHECK(adaptive.pending.empty());CHECK(!adaptive.polls.empty());
+        testMillis=start+2999;healthyTick(adaptive);CHECK(radio.sent.size()==before+1);
+        testMillis=start+3000;healthyTick(adaptive);CHECK(radio.sent.size()==before+2);CHECK(adaptive.polls.front().sent==1);
+        testMillis=start+120001;healthyTick(adaptive);CHECK(adaptive.pending.empty());CHECK(!adaptive.polls.empty());
         auto timeout=lastEvent(adaptive,"POLL_ENV_RESULT");CHECK(cJSON_IsFalse(cJSON_GetObjectItem(timeout.get(),"success")));
         auto &ping=adaptive.polls.front();ping.replies=1;adaptive.sendDiagnosticStates();
         state=lastEvent(adaptive,"RADIO_COMMAND_STATE");CHECK(std::string(sget(state.get(),"state"))=="partial");CHECK(cJSON_IsFalse(cJSON_GetObjectItem(state.get(),"blocking")));
@@ -483,6 +489,36 @@ int main(int argc, char **argv) {
         command(airG,"{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2864434397}");
         CHECK(airG.polls.empty());CHECK(!airG.pending.empty()&&airG.pending.back().kind=="env");
 
+    }
+    // Repeated server restarts retire each old client, preserve settings and
+    // reconnect without reboot. These calls intentionally do not synthesize ACKs.
+    {
+        MvtWssGateway reconnect;
+        reconnect.configuredRoom=moduleConfig.mqtt.username;
+        reconnect.configuredKey=moduleConfig.mqtt.password;
+        reconnect.configuredAddress=moduleConfig.mqtt.address;
+        testMillis+=20000;reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
+        auto created=testWsCreated;
+        testMillis+=16000;reconnect.runOnce();CHECK(testWsCreated==created&&reconnect.wsClient!=nullptr);
+        testMillis+=14000;reconnect.runOnce();CHECK(reconnect.wsClient==nullptr);
+        for(int cycle=0;cycle<50;++cycle){
+            testMillis+=15001;reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
+            MvtWssGateway::handleWsEvent(&reconnect,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
+            reconnect.runOnce();CHECK(reconnect.authSent);
+            reconnect.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");CHECK(reconnect.authenticated);
+            auto destroyed=testWsDestroyed;
+            MvtWssGateway::handleWsEvent(&reconnect,nullptr,cycle%2?WEBSOCKET_EVENT_CLOSED:WEBSOCKET_EVENT_DISCONNECTED,nullptr);
+            reconnect.runOnce();CHECK(reconnect.wsClient==nullptr);CHECK(testWsDestroyed==destroyed+1);
+            CHECK(!reconnect.authenticated&&reconnect.frame.empty());
+            created=testWsCreated;testMillis+=14999;reconnect.runOnce();CHECK(testWsCreated==created);
+        }
+        testMillis+=15001;reconnect.runOnce();
+        MvtWssGateway::handleWsEvent(&reconnect,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
+        reconnect.runOnce();reconnect.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");
+        testMillis+=74000;reconnect.handleIncomingCommand("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}");
+        reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
+        testMillis+=75000;reconnect.runOnce();CHECK(reconnect.wsClient==nullptr);CHECK(!reconnect.authenticated);
+        testMillis+=15001;reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
     }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {

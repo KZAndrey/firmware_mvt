@@ -16,15 +16,17 @@ struct esp_websocket_event_data_t {
 struct esp_websocket_client_config_t {
     const char *uri; const char *cert_pem; int task_stack, buffer_size, ping_interval_sec, pingpong_timeout_sec;
     bool disable_auto_reconnect;
+    int network_timeout_ms;
 };
 extern std::vector<std::string> testSent;
 extern bool testSendFailure;
 extern bool testSendBusy;
+extern int testWsCreated, testWsDestroyed;
 inline bool esp_websocket_client_is_connected(void *) { return !testSendFailure; }
-inline void *esp_websocket_client_init(const esp_websocket_client_config_t *) { return reinterpret_cast<void *>(1); }
+inline void *esp_websocket_client_init(const esp_websocket_client_config_t *) { ++testWsCreated;return reinterpret_cast<void *>(1); }
 inline int esp_websocket_client_start(void *) { return ESP_OK; }
 inline int esp_websocket_client_stop(void *) { return ESP_OK; }
-inline int esp_websocket_client_destroy(void *) { return ESP_OK; }
+inline int esp_websocket_client_destroy(void *) { ++testWsDestroyed;return ESP_OK; }
 inline int esp_websocket_register_events(void *, int, void (*)(void *, void *, int32_t, void *), void *) { return ESP_OK; }
 inline int esp_websocket_client_send_text(void *, const char *p, int len, int) {
     if (testSendFailure || testSendBusy) return -1;
