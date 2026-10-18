@@ -244,7 +244,6 @@ void MvtWssGateway::connectWs() {
     cfg.uri = url.c_str(); cfg.cert_pem = MVT_ROOT_CA;
     cfg.task_stack = 6144; cfg.buffer_size = 2048;
     cfg.ping_interval_sec = 20; cfg.pingpong_timeout_sec = 45;
-    cfg.network_timeout_ms = 10000;
     cfg.disable_auto_reconnect = true;
     wsClient = esp_websocket_client_init(&cfg);
     if (!wsClient) return;

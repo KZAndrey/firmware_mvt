@@ -16,7 +16,6 @@ struct esp_websocket_event_data_t {
 struct esp_websocket_client_config_t {
     const char *uri; const char *cert_pem; int task_stack, buffer_size, ping_interval_sec, pingpong_timeout_sec;
     bool disable_auto_reconnect;
-    int network_timeout_ms;
 };
 extern std::vector<std::string> testSent;
 extern bool testSendFailure;
