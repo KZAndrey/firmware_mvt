@@ -30,6 +30,8 @@ async function connect(url) {
   try {
     const room=api.getOrCreateRoom('ROOM1','relay-secret','coord-secret','spec-secret',{ownerUid:'test-owner',name:'WSS Test'});
     room.state.wssHopLimit=2;
+    // This fixture exercises an approved coordinator; new invitations require owner approval.
+    room.guestPermissions = {'test-coordinator': {access: {role:'coordinator', pending:false, revoked:false}}};
     await new Promise(resolve=>api.server.listen(0,'127.0.0.1',resolve));
     const url=`ws://127.0.0.1:${api.server.address().port}/ws`;
     gateway=await connect(url); const rows=fs.readFileSync(transcript,'utf8').trim().split('\n').map(JSON.parse);
