@@ -20,6 +20,10 @@ poll_test = build / 'websocket_poll_test.exe'
 subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/websocket_poll_test.cpp',
                 '-o', str(poll_test)], env=env, check=True)
 subprocess.run([str(poll_test)], check=True)
+receive_test = build / 'websocket_receive_test.exe'
+subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/websocket_receive_test.cpp',
+                '-o', str(receive_test)], env=env, check=True)
+subprocess.run([str(receive_test)], check=True)
 marker_test = build / 'ota_marker_test.exe'
 subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/ota_marker_test.cpp',
                 '-o', str(marker_test)], env=env, check=True)

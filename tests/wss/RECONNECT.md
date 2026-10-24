@@ -1,5 +1,14 @@
 # Reconnection regression coverage (2.7.15.1810)
 
+2026-10-24: `websocket_receive_test.cpp` now executes the actual receive helper.
+The original helper failed the bounded test on a stalled partial frame. The
+helper now rejects zero progress inside a frame, checks stop between reads and
+limits the full frame to 30 seconds (individual transport reads remain 10s).
+This prevents an indefinitely drip-fed frame from keeping the transport mutex
+and blocking stop/reconnect. Empty control frames and valid chunked frames are
+still accepted. This reproduction does not establish the cause of a historical
+hardware outage without logs from that outage.
+
 The production gateway now separates a connection attempt from the 15-second
 retry delay. A live TLS attempt has a 30-second lifecycle budget; the configured
 transport timeout is 10 seconds. DISCONNECTED/CLOSED marks the client for

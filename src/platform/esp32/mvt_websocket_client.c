@@ -537,44 +537,7 @@ esp_err_t esp_websocket_client_set_uri(esp_websocket_client_handle_t client, con
     return ESP_OK;
 }
 
-static esp_err_t esp_websocket_client_recv(esp_websocket_client_handle_t client)
-{
-    int rlen;
-    client->payload_offset = 0;
-    do {
-        rlen = esp_transport_read(client->transport, client->rx_buffer, client->buffer_size, client->config->network_timeout_ms);
-        if (rlen < 0) {
-            ESP_LOGE(TAG, "Error read data");
-            return ESP_FAIL;
-        }
-        client->payload_len = esp_transport_ws_get_read_payload_len(client->transport);
-        client->last_opcode = esp_transport_ws_get_read_opcode(client->transport);
-
-        if (rlen == 0 && client->last_opcode == WS_TRANSPORT_OPCODES_NONE ) {
-            ESP_LOGV(TAG, "esp_transport_read timeouts");
-            return ESP_OK;
-        }
-
-        esp_websocket_client_dispatch_event(client, WEBSOCKET_EVENT_DATA, client->rx_buffer, rlen);
-
-        client->payload_offset += rlen;
-    } while (client->payload_offset < client->payload_len);
-
-    // if a PING message received -> send out the PONG, this will not work for PING messages with payload longer than buffer len
-    if (client->last_opcode == WS_TRANSPORT_OPCODES_PING) {
-        const char *data = (client->payload_len == 0) ? NULL : client->rx_buffer;
-        ESP_LOGD(TAG, "Sending PONG with payload len=%d", client->payload_len);
-        esp_transport_ws_send_raw(client->transport, WS_TRANSPORT_OPCODES_PONG | WS_TRANSPORT_OPCODES_FIN, data, client->payload_len,
-                                  client->config->network_timeout_ms);
-    } else if (client->last_opcode == WS_TRANSPORT_OPCODES_PONG) {
-        client->wait_for_pong_resp = false;
-    } else if (client->last_opcode == WS_TRANSPORT_OPCODES_CLOSE) {
-        ESP_LOGD(TAG, "Received close frame");
-        client->state = WEBSOCKET_STATE_CLOSING;
-    }
-
-    return ESP_OK;
-}
+#include "mvt_websocket_receive.inc"
 
 static int esp_websocket_client_send_with_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout);
 
