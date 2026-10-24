@@ -600,6 +600,7 @@ static void esp_websocket_client_task(void *pv)
                                           client->config->host,
                                           client->config->port,
                                           client->config->network_timeout_ms) < 0) {
+                    mvt_ws_diagnostic(client, "connect", -1, errno);
                     ESP_LOGE(TAG, "Error transport connect");
                     esp_websocket_client_abort_connection(client);
                     break;
