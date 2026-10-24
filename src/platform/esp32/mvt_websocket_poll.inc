@@ -8,6 +8,7 @@ static bool mvt_websocket_poll(esp_websocket_client_handle_t client, int *read_s
         // Bound the time a sender waits behind an idle read poll.
         *read_select = esp_transport_poll_read(client->transport, 20);
         if (*read_select < 0) {
+            mvt_ws_diagnostic(client, "poll_read", *read_select, errno);
             ESP_LOGE(TAG, "Network error: esp_transport_poll_read() returned %d, errno=%d", *read_select, errno);
             esp_websocket_client_abort_connection(client);
         }

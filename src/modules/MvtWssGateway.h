@@ -72,6 +72,7 @@ private:
     bool authenticated = false, authSent = false, authBlocked = false;
     bool snapshotPending = false;
     const char *displayError = nullptr;
+    int lastWifiStatus = -1;
     uint32_t lastHeartbeatMs = 0, lastConnectAttemptMs = 0, authStartedMs = 0;
     uint64_t serverTimeMs = 0;
     uint32_t serverTimeTick = 0;

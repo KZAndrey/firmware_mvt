@@ -16,6 +16,10 @@
 // See MVT-WEBSOCKET.md for provenance and the local patch.
 #if HAS_MVT_WSS_GATEWAY
 #include <stdio.h>
+#include <errno.h>
+#include "esp_tls.h"
+#include "esp_wifi.h"
+#include "esp_system.h"
 
 #include "esp_websocket_client.h"
 #include "esp_transport.h"
@@ -156,6 +160,23 @@ static esp_err_t esp_websocket_client_dispatch_event(esp_websocket_client_handle
         return err;
     }
     return esp_event_loop_run(client->event_handle, 0);
+}
+
+// Called under the transport lock, before teardown clears the TLS error tracker.
+// Only numeric diagnostics and constant stage names; never URLs, payloads or credentials.
+static void mvt_ws_diagnostic(esp_websocket_client_handle_t client, const char *stage, int result, int saved_errno)
+{
+    int tls_code = 0, tls_flags = 0, tls_error = 0;
+    esp_tls_error_handle_t handle = esp_transport_get_error_handle(client->transport);
+    if (handle) tls_error = esp_tls_get_and_clear_last_error(handle, &tls_code, &tls_flags);
+    int socket_error = esp_transport_get_errno(client->transport);
+    wifi_ap_record_t ap = {0};
+    int wifi_result = esp_wifi_sta_get_ap_info(&ap);
+    ESP_LOGE(TAG, "MVT_WSS_DIAG stage=%s ret=%d errno=%d socket_errno=%d tls_error=%d tls_code=%d tls_flags=%d uptime_ms=%llu wifi_rc=%d rssi=%d heap=%u opcode=%d payload=%d offset=%d run=%d state=%d",
+             stage, result, saved_errno, socket_error, tls_error, tls_code, tls_flags,
+             (unsigned long long)_tick_get_ms(), wifi_result, wifi_result == ESP_OK ? ap.rssi : 0,
+             (unsigned)esp_get_free_heap_size(), (int)client->last_opcode, client->payload_len,
+             client->payload_offset, client->run, (int)client->state);
 }
 
 static esp_err_t esp_websocket_client_abort_connection(esp_websocket_client_handle_t client)
@@ -606,6 +627,7 @@ static void esp_websocket_client_task(void *pv)
 
                     if ( _tick_get_ms() - client->pingpong_tick_ms > client->config->pingpong_timeout_sec*1000 ) {
                         if (client->wait_for_pong_resp) {
+                            mvt_ws_diagnostic(client, "pong_timeout", -1, 0);
                             ESP_LOGE(TAG, "Error, no PONG received for more than %d seconds after PING", client->config->pingpong_timeout_sec);
                             esp_websocket_client_abort_connection(client);
                             break;
@@ -834,6 +856,7 @@ static int esp_websocket_client_send_with_opcode(esp_websocket_client_handle_t c
                                         (timeout==portMAX_DELAY)? -1 : timeout * portTICK_PERIOD_MS);
         if (wlen < 0 || (wlen == 0 && need_write != 0)) {
             ret = wlen;
+            mvt_ws_diagnostic(client, "write", ret, errno);
             ESP_LOGE(TAG, "Network error: esp_transport_write() returned %d, errno=%d", ret, errno);
             esp_websocket_client_abort_connection(client);
             goto unlock_and_return;

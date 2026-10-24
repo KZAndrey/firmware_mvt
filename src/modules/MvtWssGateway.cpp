@@ -180,6 +180,7 @@ void MvtWssGateway::handleWsEvent(void *args, esp_event_base_t, int32_t id, void
     if (!self) return;
     if (id == WEBSOCKET_EVENT_CONNECTED) self->socketConnected = true;
     else if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED) {
+        LOG_WARN("MVT WSS disconnected event=%d uptime=%u wifi=%d ackAge=%u heartbeatAge=%u", int(id), unsigned(millis()), int(WiFi.status()), unsigned(millis()-self->lastServerAckMs), unsigned(millis()-self->lastHeartbeatMs));
         self->socketConnected = false;
         self->connectionEnded = true;
     }
@@ -1017,6 +1018,11 @@ void MvtWssGateway::advancePolls() {
     }
 }
 int32_t MvtWssGateway::runOnce() {
+    const int wifiStatus = int(WiFi.status());
+    if (wifiStatus != lastWifiStatus) {
+        LOG_WARN("MVT WSS wifi old=%d new=%d uptime=%u", lastWifiStatus, wifiStatus, unsigned(millis()));
+        lastWifiStatus = wifiStatus;
+    }
     auto *radio=RadioLibInterface::instance;
     mvtOtaUpdater.tick(authenticated&&socketConnected&&radio&&radio->getFreq()>0&&ESP.getFreeHeap()>32768);
     if(mvtOtaUpdater.changed()&&authenticated&&mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));

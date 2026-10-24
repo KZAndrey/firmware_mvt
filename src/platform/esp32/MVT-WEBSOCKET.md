@@ -35,3 +35,13 @@ Send-lock contention on a still-connected client retains the queued message for
 retry. It does not tear down the TLS session. Reconnect waits until the OTA worker
 has exited and uses the normal retry interval after client destruction, allowing
 FreeRTOS idle cleanup to reclaim the deleted task stacks before a new handshake.
+
+## Diagnostic release 2.7.15.24101 (generation 15)
+
+Adds numeric MVT_WSS_DIAG records before transport teardown: stage, return value,
+saved errno, captured socket errno, ESP-TLS error/code/flags, uptime, Wi-Fi AP
+query result, RSSI, free heap and frame counters. Zero error fields mean no error
+was captured, not proof of a healthy connection. The transport error tracker is
+read before abort closes it. No addresses, credentials or packet contents are
+logged by this diagnostic helper. Wi-Fi state transitions and disconnect uptime /
+ACK ages are logged by the gateway. Reconnect and heartbeat timings are unchanged.

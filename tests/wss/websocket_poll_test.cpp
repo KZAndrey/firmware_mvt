@@ -1,6 +1,7 @@
 // Host regression for the production transport lifetime critical section.
 #include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -25,6 +26,7 @@ struct Client {
     int transport = 1, status_bits = CLOSE_FRAME_SENT_BIT;
 };
 using esp_websocket_client_handle_t = Client *;
+void mvt_ws_diagnostic(Client*,const char*,int,int) {}
 void xSemaphoreTakeRecursive(std::recursive_mutex *m, int) { m->lock();++lockDepth; }
 void xSemaphoreGiveRecursive(std::recursive_mutex *m) { --lockDepth;m->unlock(); }
 int xEventGroupGetBits(int bits) { return bits; }

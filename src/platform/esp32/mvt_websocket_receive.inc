@@ -8,13 +8,17 @@ static esp_err_t esp_websocket_client_recv(esp_websocket_client_handle_t client)
         // Bound the entire frame and let stop() retire the worker without reboot.
         const uint32_t elapsed = (uint32_t)(_tick_get_ms() - started);
         if (!client->run || elapsed >= 30000) {
+            mvt_ws_diagnostic(client, client->run ? "frame_deadline" : "receive_cancelled", -1, 0);
             ESP_LOGE(TAG, "Receive stopped or frame deadline exceeded");
             return ESP_FAIL;
         }
         const int remaining = (int)(30000 - elapsed);
         const int timeout = client->config->network_timeout_ms < remaining ? client->config->network_timeout_ms : remaining;
+        errno = 0;
         rlen = esp_transport_read(client->transport, client->rx_buffer, client->buffer_size, timeout);
+        const int read_errno = errno;
         if (rlen < 0 || !client->run || (uint32_t)(_tick_get_ms() - started) >= 30000) {
+            mvt_ws_diagnostic(client, rlen < 0 ? "read" : !client->run ? "receive_cancelled" : "frame_deadline", rlen, read_errno);
             ESP_LOGE(TAG, "Error read data");
             return ESP_FAIL;
         }
@@ -27,6 +31,7 @@ static esp_err_t esp_websocket_client_recv(esp_websocket_client_handle_t client)
         }
 
         if (rlen == 0 && client->payload_offset < client->payload_len) {
+            mvt_ws_diagnostic(client, "partial_frame_stalled", rlen, read_errno);
             ESP_LOGE(TAG, "Incomplete frame made no progress");
             return ESP_FAIL;
         }
