@@ -53,6 +53,12 @@ async function connect(url) {
     assert.equal(node.heartRate,101); assert.equal(node.alt,-20); assert.equal(node.callsign,'Offline');
     assert(node.lastUpdateMs>=1577836800000); assert(room.state.trackHistory.get('!aabbccdd_mv').length>0);
     await until(()=>coord.messages.some(e=>e.type==='AIR_SENSOR_RESULT'&&e.final&&e.success&&e.co2===720));
+    await until(()=>coord.messages.filter(e=>e.type==='TRACEROUTE_RESULT').length===rows.filter(e=>e.type==='TRACEROUTE_RESULT').length);
+    const traces=coord.messages.filter(e=>e.type==='TRACEROUTE_RESULT');
+    assert(traces.some(e=>e.durationMs===1234&&e.asymmetric===true&&e.outboundHops===1&&e.returnHops===1));
+    assert(traces.some(e=>e.durationMs===200&&e.asymmetric===false&&e.outboundHops===3&&e.returnHops===3));
+    assert(traces.some(e=>e.returnRouteKnown===false&&e.asymmetric===null&&e.returnHops===null));
+    assert(traces.every(e=>e.transport==='WSS'&&e.receivedAt>=1577836800000));
     // Historical/partial snapshots cannot erase newer position or full name.
     const nativeKey='!aabbccdd', liveTime=Date.now();
     gateway.send({type:'NODE_UPDATE',node:{nodeKey:nativeKey,nodeId:0xaabbccdd,callsign:'A',

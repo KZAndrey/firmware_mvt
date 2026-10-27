@@ -235,8 +235,49 @@ int main(int argc, char **argv) {
     route.route_back_count = 1; route.route_back[0] = 8; route.snr_back_count = 2; route.snr_back[0] = 12; route.snr_back[1] = 24;
     p = incoming(0xaabbccdd, sent.id, meshtastic_PortNum_TRACEROUTE_APP);
     p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_RouteDiscovery_msg, &route);
+    testMillis += 1234;
     g.handleReceived(p); result = lastEvent(g, "TRACEROUTE_RESULT");
+    CHECK(nget(result.get(), "durationMs") == 1234);
+    CHECK(nget(result.get(), "rttMs") == 1234);
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItem(result.get(), "returnRouteKnown")));
     CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(result.get(), "outbound")) == 1); CHECK(nget(result.get(), "outboundLastSnr") == -2);
+    // Decode actual protobufs: direct links are known only with recorded route evidence.
+    // Also check missing SNR sentinel, multiple relays and millis() wrap-around.
+    for (int count = 0; count <= 3; ++count) {
+        route = meshtastic_RouteDiscovery_init_default;
+        route.route_count = route.route_back_count = count;
+        route.snr_towards_count = route.snr_back_count = count + 1;
+        for (int i = 0; i < count; ++i) {
+            route.route[i] = 7 + i; route.route_back[i] = 7 + count - 1 - i;
+            route.snr_towards[i] = INT8_MIN; route.snr_back[i] = -20;
+        }
+        route.snr_towards[count] = INT8_MIN; route.snr_back[count] = 0;
+        p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_RouteDiscovery_msg, &route);
+        MvtWssGateway::Pending pending(99, 0xaabbccdd, UINT32_MAX - 99, "trace", "!aabbccdd", false);
+        const auto savedMillis = testMillis; testMillis = 100;
+        g.finishDiagnostic(pending, true, &p);
+        testMillis = savedMillis;
+        result = lastEvent(g, "TRACEROUTE_RESULT");
+        CHECK(nget(result.get(), "durationMs") == 200);
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(result.get(), "outboundKnown")));
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(result.get(), "returnRouteKnown")));
+        CHECK(!cJSON_GetObjectItem(result.get(), "outboundLastSnr"));
+        CHECK(nget(result.get(), "returnLastSnr") == 0);
+        auto *out = cJSON_GetObjectItem(result.get(), "outbound");
+        auto *back = cJSON_GetObjectItem(result.get(), "returnRoute");
+        CHECK(cJSON_GetArraySize(out) == count && cJSON_GetArraySize(back) == count);
+        for (int i = 0; i < count; ++i) {
+            CHECK(nget(cJSON_GetArrayItem(out, i), "nodeId") == 7 + i);
+            CHECK(nget(cJSON_GetArrayItem(back, i), "nodeId") == 7 + count - 1 - i);
+            CHECK(!cJSON_GetObjectItem(cJSON_GetArrayItem(out, i), "snr"));
+        }
+    }
+    route = meshtastic_RouteDiscovery_init_default;
+    route.route_count = 1; route.route[0] = 7;
+    p.decoded.payload.size = pb_encode_to_bytes(p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes), &meshtastic_RouteDiscovery_msg, &route);
+    g.finishDiagnostic(MvtWssGateway::Pending(99, 0xaabbccdd, testMillis, "trace", "!aabbccdd", false), true, &p);
+    result = lastEvent(g, "TRACEROUTE_RESULT");
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItem(result.get(), "returnRouteKnown")));
     // Virtual beacon, optional signed altitude/heart rate, JSON escaping.
     payload = mvt::Payload(); payload.name = u8"А\"Б"; payload.comment = u8"маяк"; payload.lat = 43.25; payload.lon = 76.9;
     payload.flags = 16 | 32; payload.altitude = -20; payload.heartRate = 101; payload.battery = 80; payload.charging = true;

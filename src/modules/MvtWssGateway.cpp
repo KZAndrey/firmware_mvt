@@ -445,7 +445,11 @@ void MvtWssGateway::finishDiagnostic(const Pending &p, bool success, const mesht
         cJSON_AddBoolToObject(e, "telemetryReceived", p.telemetryReceived);
         cJSON_AddBoolToObject(e, "nodeInfoReceived", p.nodeInfoReceived);
     }
-    if (success) cJSON_AddNumberToObject(e, "rttMs", uint32_t(millis() - p.started));
+    if (success) {
+        const uint32_t elapsed = uint32_t(millis() - p.started);
+        cJSON_AddNumberToObject(e, "rttMs", elapsed); // Older portals and ping consumers.
+        if (p.kind == "trace") cJSON_AddNumberToObject(e, "durationMs", elapsed);
+    }
     if (mp) {
         cJSON_AddNumberToObject(e, "snr", mp->rx_snr);
         cJSON_AddNumberToObject(e, "hops", mp->hop_start >= mp->hop_limit ? mp->hop_start - mp->hop_limit : 0);
@@ -471,6 +475,8 @@ void MvtWssGateway::finishDiagnostic(const Pending &p, bool success, const mesht
                     cJSON_AddItemToArray(a, h);
                 }
             };
+            cJSON_AddBoolToObject(e, "outboundKnown", r.route_count > 0 || r.snr_towards_count > 0);
+            cJSON_AddBoolToObject(e, "returnRouteKnown", r.route_back_count > 0 || r.snr_back_count > 0);
             addRoute("outbound", r.route, r.route_count, r.snr_towards, r.snr_towards_count);
             addRoute("returnRoute", r.route_back, r.route_back_count, r.snr_back, r.snr_back_count);
             if (r.snr_towards_count > r.route_count && r.snr_towards[r.route_count] != INT8_MIN)
