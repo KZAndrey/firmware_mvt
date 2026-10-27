@@ -227,7 +227,9 @@ void MvtWssGateway::disconnectWs() {
     socketConnected = false; authenticated = false; authSent = false;
     connecting = false; connectionEnded = false; lastServerAckMs = 0;
     snapshot.clear();
-    frame.clear(); frameExpected = 0; inputFault = false;
+    // stop/destroy above has joined the receiver: release its largest frame
+    // allocation rather than retaining it while the next TLS session allocates.
+    std::string().swap(frame); frameExpected = 0; inputFault = false;
     char *p;
     while (incoming && xQueueReceive(incoming, &p, 0) == pdTRUE) free(p);
 }

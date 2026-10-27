@@ -179,6 +179,14 @@ void MvtOtaUpdater::run(){
     vTaskDelay(pdMS_TO_TICKS(2000));esp_restart();
 }
 void MvtOtaUpdater::tick(bool healthy){
+    // Called by the gateway task, which also owns start/chunk/onDisconnect.
+    // The worker publishes completion only after it has stopped using chunks.
+    // Do not retain OTA-only allocations across a subsequent TLS handshake.
+    if(!workerRunning() && state.load()==Failed && chunks){
+        vQueueDelete(chunks);chunks=nullptr;
+        std::string().swap(signature);std::string().swap(hash);std::string().swap(version);
+        LOG_INFO("MVT OTA cleanup heap=%u largest=%u",ESP.getFreeHeap(),ESP.getMaxAllocHeap());
+    }
     if(!trial)return;
     if(generation!=MVT_OTA_GENERATION||roomId!=moduleConfig.mqtt.username||nodeId!=nodeDB->getNodeNum())healthy=false;
     if(!healthy){healthySince=0;return;}

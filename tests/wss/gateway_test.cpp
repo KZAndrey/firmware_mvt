@@ -548,10 +548,12 @@ int main(int argc, char **argv) {
             MvtWssGateway::handleWsEvent(&reconnect,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
             reconnect.runOnce();CHECK(reconnect.authSent);
             reconnect.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");CHECK(reconnect.authenticated);
+            reconnect.frame.reserve(8192);
             auto destroyed=testWsDestroyed;
             MvtWssGateway::handleWsEvent(&reconnect,nullptr,cycle%2?WEBSOCKET_EVENT_CLOSED:WEBSOCKET_EVENT_DISCONNECTED,nullptr);
             reconnect.runOnce();CHECK(reconnect.wsClient==nullptr);CHECK(testWsDestroyed==destroyed+1);
             CHECK(!reconnect.authenticated&&reconnect.frame.empty());
+            CHECK(reconnect.frame.capacity()<8192);
             created=testWsCreated;testMillis+=14999;reconnect.runOnce();CHECK(testWsCreated==created);
         }
         testMillis+=15001;reconnect.runOnce();

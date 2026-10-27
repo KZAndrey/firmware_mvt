@@ -23,17 +23,21 @@ static uint32_t clockMs=0;
 static int mode=0,receives=0,opens=0,aborts=0,writes=0,boots=0,cryptoLive=0,shaLive=0,deletes=0;
 struct Queue {size_t size=0;bool full=false;std::vector<uint8_t> data;};
 static Queue queue;
+static int queuesLive=0;
 struct Chunk {uint32_t offset;size_t length;uint8_t data[2048];};
 uint32_t millis(){return ++clockMs;}
 void vTaskDelay(unsigned n){clockMs+=n;}
-int xTaskCreate(void (*f)(void *),const char *,unsigned,void *p,unsigned,TaskHandle_t *h){task=f;taskContext=p;*h=p;return pdPASS;}
+int xTaskCreate(void (*f)(void *),const char *,unsigned,void *p,unsigned,TaskHandle_t *h){if(mode==7)return 0;task=f;taskContext=p;*h=p;return pdPASS;}
 void vTaskDelete(void *){++deletes;assert(cryptoLive==0&&shaLive==0&&opens==0);}
-QueueHandle_t xQueueCreate(unsigned count,size_t size){assert(count==1&&size==sizeof(Chunk));queue.size=size;queue.data.resize(size);return &queue;}
+QueueHandle_t xQueueCreate(unsigned count,size_t size){assert(count==1&&size==sizeof(Chunk));assert(queuesLive==0);++queuesLive;queue.size=size;queue.data.resize(size);return &queue;}
+void vQueueDelete(QueueHandle_t){assert(queuesLive==1);--queuesLive;queue.data.clear();}
 int xQueueReset(QueueHandle_t){queue.full=false;return pdPASS;}
 int xQueueOverwrite(QueueHandle_t,const void *p){memcpy(queue.data.data(),p,queue.size);queue.full=true;return pdPASS;}
 int xQueueSend(QueueHandle_t,const void *p,unsigned){return xQueueOverwrite(&queue,p);}
 int xQueueReceive(QueueHandle_t,void *p,unsigned){
     ++receives;
+    if(mode==4)return 0;
+    if(mode==5){Chunk first{};first.length=2048;memcpy(p,&first,sizeof(first));return pdPASS;}
     if(mode==3&&receives==1){Chunk first{};first.length=2048;memcpy(p,&first,sizeof(first));return pdPASS;}
     mvtOtaUpdater.onDisconnect();
     assert(queue.full);memcpy(p,queue.data.data(),queue.size);queue.full=false;return pdPASS;
@@ -42,7 +46,7 @@ const esp_partition_t *esp_ota_get_next_update_partition(const void *){return &t
 const esp_partition_t *esp_ota_get_running_partition(){return &running;}
 int esp_ota_get_state_partition(const esp_partition_t *,int *state){*state=2;return ESP_OK;}
 int esp_ota_begin(const esp_partition_t *p,size_t,esp_ota_handle_t *h){assert(p==&target);++opens;*h=1;return ESP_OK;}
-int esp_ota_write(esp_ota_handle_t,const void *,size_t){assert(opens==1);++writes;return ESP_OK;}
+int esp_ota_write(esp_ota_handle_t,const void *,size_t){assert(opens==1);++writes;return mode==5?-1:ESP_OK;}
 int esp_ota_abort(esp_ota_handle_t){assert(opens==1);--opens;++aborts;return ESP_OK;}
 int esp_ota_end(esp_ota_handle_t){--opens;return ESP_OK;}
 int esp_ota_get_partition_description(const esp_partition_t *,esp_app_desc_t *){return ESP_OK;}
@@ -53,7 +57,7 @@ void esp_restart(){assert(false);}
 int mbedtls_base64_decode(uint8_t *out,size_t capacity,size_t *n,const uint8_t *,size_t){assert(capacity>=256);memset(out,0,256);*n=256;return 0;}
 void mbedtls_pk_init(mbedtls_pk_context *){++cryptoLive;}
 int mbedtls_pk_parse_public_key(mbedtls_pk_context *,const uint8_t *,size_t){return 0;}
-int mbedtls_pk_verify(mbedtls_pk_context *,int,const uint8_t *,size_t,const uint8_t *,size_t){if(mode==1)mvtOtaUpdater.onDisconnect();return 0;}
+int mbedtls_pk_verify(mbedtls_pk_context *,int,const uint8_t *,size_t,const uint8_t *,size_t){if(mode==1)mvtOtaUpdater.onDisconnect();return mode==6?-1:0;}
 void mbedtls_pk_free(mbedtls_pk_context *){--cryptoLive;}
 int mbedtls_sha256_ret(const uint8_t *,size_t,uint8_t *out,int){memset(out,0,32);return 0;}
 void mbedtls_sha256_init(mbedtls_sha256_context *){++shaLive;}
@@ -76,19 +80,23 @@ static cJSON *command(){
 }
 int main(){
     mvtOtaUpdater.begin();
-    for(mode=0;mode<4;++mode){
+    for(mode=0;mode<8;++mode){
         receives=opens=aborts=writes=boots=cryptoLive=shaLive=deletes=0;
-        cJSON *j=command();assert(mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
-        assert(mvtOtaUpdater.workerRunning());
-        assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
+        cJSON *j=command();assert(mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum())==(mode!=7));
+        assert(mvtOtaUpdater.workerRunning()==(mode!=7));
+        if(mode!=7){mvtOtaUpdater.tick(false);assert(queuesLive==1);}
+        if(mode!=7)assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
         if(mode==0)mvtOtaUpdater.onDisconnect();
-        task(taskContext);
+        if(mode!=7)task(taskContext);
         assert(!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active());
-        assert(opens==0&&boots==0&&cryptoLive==0&&shaLive==0&&deletes==1);
-        assert(aborts==(mode>=2?1:0));assert(writes==(mode==3?1:0));
+        mvtOtaUpdater.tick(false);assert(queuesLive==0);
+        mvtOtaUpdater.tick(false);assert(queuesLive==0);
+        assert(opens==0&&boots==0&&cryptoLive==0&&shaLive==0&&deletes==(mode==7?0:1));
+        assert(aborts==(mode>=2&&mode<=5?1:0));assert(writes==(mode==3||mode==5?1:0));
         cJSON *s=mvtOtaUpdater.status(db.getNodeNum());
-        assert(strcmp(cJSON_GetObjectItemCaseSensitive(s,"error")->valuestring,"WSS_DISCONNECTED")==0);
+        const char *expected=mode==4?"WSS_DOWNLOAD_TIMEOUT":mode==5?"FLASH_WRITE":mode==6?"BAD_SIGNATURE":mode==7?"TASK_MEMORY":"WSS_DISCONNECTED";
+        assert(strcmp(cJSON_GetObjectItemCaseSensitive(s,"error")->valuestring,expected)==0);
         cJSON_Delete(s);cJSON_Delete(j);
     }
-    puts("Production OTA cancellation: before start, crypto verification, waiting chunk, partial flash; resources released and boot unchanged: PASS");
+    puts("Production OTA cancellation: before start, crypto verification, waiting chunk, partial flash; timeout, flash/signature/task failures; queue released, retry allowed and boot unchanged: PASS");
 }
