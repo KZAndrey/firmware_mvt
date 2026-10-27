@@ -238,7 +238,7 @@ int main(int argc, char **argv) {
     testMillis += 1234;
     g.handleReceived(p); result = lastEvent(g, "TRACEROUTE_RESULT");
     CHECK(nget(result.get(), "durationMs") == 1234);
-    CHECK(nget(result.get(), "rttMs") == 1234);
+    CHECK(!cJSON_GetObjectItem(result.get(), "rttMs"));
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(result.get(), "returnRouteKnown")));
     CHECK(cJSON_GetArraySize(cJSON_GetObjectItem(result.get(), "outbound")) == 1); CHECK(nget(result.get(), "outboundLastSnr") == -2);
     // Decode actual protobufs: direct links are known only with recorded route evidence.
@@ -259,6 +259,7 @@ int main(int argc, char **argv) {
         testMillis = savedMillis;
         result = lastEvent(g, "TRACEROUTE_RESULT");
         CHECK(nget(result.get(), "durationMs") == 200);
+        CHECK(!cJSON_GetObjectItem(result.get(), "rttMs"));
         CHECK(cJSON_IsTrue(cJSON_GetObjectItem(result.get(), "outboundKnown")));
         CHECK(cJSON_IsTrue(cJSON_GetObjectItem(result.get(), "returnRouteKnown")));
         CHECK(!cJSON_GetObjectItem(result.get(), "outboundLastSnr"));

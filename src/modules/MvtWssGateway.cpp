@@ -447,8 +447,7 @@ void MvtWssGateway::finishDiagnostic(const Pending &p, bool success, const mesht
     }
     if (success) {
         const uint32_t elapsed = uint32_t(millis() - p.started);
-        cJSON_AddNumberToObject(e, "rttMs", elapsed); // Older portals and ping consumers.
-        if (p.kind == "trace") cJSON_AddNumberToObject(e, "durationMs", elapsed);
+        cJSON_AddNumberToObject(e, p.kind == "trace" ? "durationMs" : "rttMs", elapsed);
     }
     if (mp) {
         cJSON_AddNumberToObject(e, "snr", mp->rx_snr);
