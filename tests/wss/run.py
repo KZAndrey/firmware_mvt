@@ -16,6 +16,11 @@ zig = str(Path(args.zig).resolve())
 build = root / '.tools' / 'wss-tests'
 build.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ, ZIG_LOCAL_CACHE_DIR=str(build / 'cache'), ZIG_GLOBAL_CACHE_DIR=str(build / 'global-cache'))
+tls_test = build / 'tls_buffer_test.exe'
+subprocess.run([zig, 'c++', '-std=c++14', '-O0', '-Itests/tls-memory/stubs', '-Isrc',
+                'tests/tls-memory/buffer_test.cpp', 'src/platform/esp32/MvtTlsMemory.cpp',
+                '-o', str(tls_test)], env=env, check=True)
+subprocess.run([str(tls_test)], check=True)
 poll_test = build / 'websocket_poll_test.exe'
 subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/websocket_poll_test.cpp',
                 '-o', str(poll_test)], env=env, check=True)

@@ -39,6 +39,7 @@ TestWiFi WiFi;
 std::vector<std::string> testSent;
 bool testSendFailure = false;
 bool testSendBusy = false;
+bool testWsInitFailure = false, testWsStartFailure = false;
 bool testOtaWorkerRunning = false;
 int testWsCreated = 0, testWsDestroyed = 0;
 // Flash NodeDB serialization is outside this host adapter; wire protobufs
@@ -563,6 +564,75 @@ int main(int argc, char **argv) {
         reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
         testMillis+=75000;reconnect.runOnce();CHECK(reconnect.wsClient==nullptr);CHECK(!reconnect.authenticated);
         testMillis+=15001;reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
+    }
+    // Replay the gateway-visible result of TLS setup allocation failure:
+    // DISCONNECTED before CONNECTED/AUTH. This is fault injection, not an
+    // emulation of mbedTLS or the ESP32 internal heap. Keep the same instance
+    // through nine captured failures and a longer one-hour failure window.
+    for (int failures : {9, 240}) {
+        const auto roomBefore=std::string(moduleConfig.mqtt.username);
+        const auto keyBefore=std::string(moduleConfig.mqtt.password);
+        const auto createdBefore=testWsCreated, destroyedBefore=testWsDestroyed;
+        {
+            MvtWssGateway retry;
+            retry.configuredRoom=roomBefore;
+            retry.configuredKey=keyBefore;
+            retry.configuredAddress=moduleConfig.mqtt.address;
+            retry.outgoing.push_back("{\"type\":\"TEST_RETAINED_EVENT\"}");
+            const auto sentBefore=testSent.size();
+            for (int attempt=0;attempt<failures;++attempt) {
+                testMillis+=attempt==0?15001:1;retry.runOnce();
+                CHECK(retry.wsClient&&retry.connecting&&!retry.authSent);
+                // The TLS worker fails before a WebSocket connection exists.
+                testMillis+=200;
+                MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_DISCONNECTED,nullptr);
+                retry.runOnce();
+                CHECK(!retry.wsClient&&!retry.connecting&&!retry.authenticated);
+                CHECK(testWsCreated-createdBefore==attempt+1);
+                CHECK(testWsDestroyed-destroyedBefore==attempt+1);
+                CHECK(WiFi.status()==WL_CONNECTED);
+                CHECK(std::string(retry.displayStatus())=="RETRY");
+                CHECK(retry.outgoing.size()==1&&testSent.size()==sentBefore);
+                for(int idle=0;idle<15;++idle){testMillis+=1000;retry.runOnce();}
+                CHECK(testWsCreated-createdBefore==attempt+1); // no rapid retry loop
+            }
+            // Allocation succeeds later: authenticate on the same gateway
+            // instance and deliver the buffered event without reset/reconfigure.
+            testMillis+=1;retry.runOnce();CHECK(retry.wsClient!=nullptr);
+            MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
+            retry.runOnce();CHECK(retry.authSent&&!retry.authenticated);
+            CHECK(std::string(sget(parse(testSent.back()).get(),"type"))=="AUTH_GATEWAY");
+            retry.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");
+            retry.handleIncomingCommand("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}");
+            flush(retry);
+            CHECK(retry.authenticated&&retry.outgoing.empty());
+            CHECK(std::string(retry.displayStatus())=="OK");
+            unsigned delivered=0;
+            for(size_t i=sentBefore;i<testSent.size();++i)
+                if(std::string(sget(parse(testSent[i]).get(),"type"))=="TEST_RETAINED_EVENT")++delivered;
+            CHECK(delivered==1);
+            CHECK(roomBefore==moduleConfig.mqtt.username&&keyBefore==moduleConfig.mqtt.password);
+            // Synthetic event is local to this fault-injection test, not part
+            // of the real protocol transcript checked by the portal tests.
+            testSent.erase(testSent.begin()+sentBefore,testSent.end());
+        }
+        CHECK(testWsCreated-createdBefore==testWsDestroyed-destroyedBefore);
+    }
+    // Allocation can also fail before the worker starts; both paths must
+    // remain retryable and destroy only successfully created clients.
+    {
+        MvtWssGateway retry;
+        retry.configuredRoom=moduleConfig.mqtt.username;
+        retry.configuredKey=moduleConfig.mqtt.password;
+        retry.configuredAddress=moduleConfig.mqtt.address;
+        auto created=testWsCreated,destroyed=testWsDestroyed;
+        testWsInitFailure=true;testMillis+=15001;retry.runOnce();
+        CHECK(!retry.wsClient&&testWsCreated==created&&testWsDestroyed==destroyed);
+        testWsInitFailure=false;testWsStartFailure=true;
+        testMillis+=15001;retry.runOnce();
+        CHECK(!retry.wsClient&&testWsCreated==created+1&&testWsDestroyed==destroyed+1);
+        testWsStartFailure=false;testMillis+=15001;retry.runOnce();
+        CHECK(retry.wsClient&&retry.connecting);
     }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {

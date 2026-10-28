@@ -20,6 +20,8 @@
 #include "esp_tls.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
+#include "MvtTlsMemory.h"
 
 #include "esp_websocket_client.h"
 #include "esp_transport.h"
@@ -36,6 +38,20 @@
 #include "esp_timer.h"
 
 static const char *TAG = "WEBSOCKET_CLIENT";
+
+// One gateway WebSocket task. Observe failed allocations without allocating,
+// logging, or taking heap locks inside the allocator's failure hook.
+static TaskHandle_t mvt_alloc_task;
+static uint32_t mvt_alloc_size, mvt_alloc_caps, mvt_alloc_count;
+static bool mvt_alloc_hook_registered;
+static void mvt_alloc_failed(size_t size, uint32_t caps, const char *function_name)
+{
+    (void)function_name;
+    if (xPortInIsrContext() || xTaskGetCurrentTaskHandle() != __atomic_load_n(&mvt_alloc_task, __ATOMIC_RELAXED)) return;
+    __atomic_store_n(&mvt_alloc_size, (uint32_t)size, __ATOMIC_RELAXED);
+    __atomic_store_n(&mvt_alloc_caps, caps, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&mvt_alloc_count, 1, __ATOMIC_RELAXED);
+}
 
 #define WEBSOCKET_TCP_DEFAULT_PORT      (80)
 #define WEBSOCKET_SSL_DEFAULT_PORT      (443)
@@ -172,11 +188,22 @@ static void mvt_ws_diagnostic(esp_websocket_client_handle_t client, const char *
     int socket_error = esp_transport_get_errno(client->transport);
     wifi_ap_record_t ap = {0};
     int wifi_result = esp_wifi_sta_get_ap_info(&ap);
-    ESP_LOGE(TAG, "MVT_WSS_DIAG stage=%s ret=%d errno=%d socket_errno=%d tls_error=%d tls_code=%d tls_flags=%d uptime_ms=%llu wifi_rc=%d rssi=%d heap=%u opcode=%d payload=%d offset=%d run=%d state=%d",
+    // The pinned small printf does not support %llu: it also misreads all
+    // following arguments. A 32-bit millisecond counter matches gateway logs.
+    // TLS uses internal byte-addressable memory in this SDK; total heap alone
+    // cannot show whether its buffers fit after transport/task allocations.
+    ESP_LOGE(TAG, "MVT_WSS_DIAG stage=%s ret=%d errno=%d socket_errno=%d tls_error=%d tls_code=%d tls_flags=%d uptime_ms=%u wifi_rc=%d rssi=%d heap=%u internal_free=%u internal_largest=%u opcode=%d payload=%d offset=%d run=%d state=%d",
              stage, result, saved_errno, socket_error, tls_error, tls_code, tls_flags,
-             (unsigned long long)_tick_get_ms(), wifi_result, wifi_result == ESP_OK ? ap.rssi : 0,
-             (unsigned)esp_get_free_heap_size(), (int)client->last_opcode, client->payload_len,
+             (unsigned)(uint32_t)_tick_get_ms(), wifi_result, wifi_result == ESP_OK ? ap.rssi : 0,
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (int)client->last_opcode, client->payload_len,
              client->payload_offset, client->run, (int)client->state);
+    ESP_LOGE(TAG, "MVT_WSS_ALLOC failures=%u last_bytes=%u last_caps=%u",
+             (unsigned)__atomic_load_n(&mvt_alloc_count, __ATOMIC_RELAXED),
+             (unsigned)__atomic_load_n(&mvt_alloc_size, __ATOMIC_RELAXED),
+             (unsigned)__atomic_load_n(&mvt_alloc_caps, __ATOMIC_RELAXED));
 }
 
 static esp_err_t esp_websocket_client_abort_connection(esp_websocket_client_handle_t client)
@@ -320,6 +347,14 @@ static esp_err_t set_websocket_transport_optional_settings(esp_websocket_client_
 
 esp_websocket_client_handle_t esp_websocket_client_init(const esp_websocket_client_config_t *config)
 {
+    if (!mvt_tls_memory_init()) {
+        ESP_LOGE(TAG, "MVT TLS buffer allocator initialization failed");
+        return NULL;
+    }
+    if (!mvt_alloc_hook_registered) {
+        mvt_alloc_hook_registered = heap_caps_register_failed_alloc_callback(mvt_alloc_failed) == ESP_OK;
+        if (!mvt_alloc_hook_registered) ESP_LOGE(TAG, "MVT allocation observer unavailable");
+    }
     esp_websocket_client_handle_t client = calloc(1, sizeof(struct esp_websocket_client));
     ESP_WS_CLIENT_MEM_CHECK(TAG, client, return NULL);
 
@@ -568,6 +603,11 @@ static int esp_websocket_client_send_close(esp_websocket_client_handle_t client,
 
 static void esp_websocket_client_task(void *pv)
 {
+    __atomic_store_n(&mvt_alloc_size, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&mvt_alloc_caps, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&mvt_alloc_count, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&mvt_alloc_task, xTaskGetCurrentTaskHandle(), __ATOMIC_RELAXED);
+    mvt_tls_memory_set_task(xTaskGetCurrentTaskHandle());
     const int lock_timeout = portMAX_DELAY;
     esp_websocket_client_handle_t client = (esp_websocket_client_handle_t) pv;
     //get transport by scheme
@@ -688,6 +728,8 @@ static void esp_websocket_client_task(void *pv)
     client->run = false;
     xSemaphoreGiveRecursive(client->lock);
     // Publish completion only after the last access to client storage.
+    __atomic_store_n(&mvt_alloc_task, NULL, __ATOMIC_RELAXED);
+    mvt_tls_memory_set_task(NULL);
     xEventGroupSetBits(client->status_bits, STOPPED_BIT);
     vTaskDelete(NULL);
 }

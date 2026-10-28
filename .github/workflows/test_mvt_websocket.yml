@@ -3,6 +3,8 @@ on:
   push:
     paths:
       - 'src/platform/esp32/mvt_websocket_*'
+      - 'src/platform/esp32/MvtTls*'
+      - 'tests/tls-memory/**'
       - 'tests/wss/websocket_poll_test.cpp'
       - 'tests/wss/websocket_receive_test.cpp'
       - 'src/modules/MvtOta*'
@@ -12,6 +14,8 @@ on:
   pull_request:
     paths:
       - 'src/platform/esp32/mvt_websocket_*'
+      - 'src/platform/esp32/MvtTls*'
+      - 'tests/tls-memory/**'
       - 'tests/wss/websocket_poll_test.cpp'
       - 'tests/wss/websocket_receive_test.cpp'
       - 'src/modules/MvtOta*'
@@ -26,6 +30,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - name: Verify TLS reserve with fragmented-heap fault injection
+        run: |
+          g++ -std=c++14 -pthread -Wall -Wextra -Itests/tls-memory/stubs -Isrc tests/tls-memory/buffer_test.cpp src/platform/esp32/MvtTlsMemory.cpp -o /tmp/tls-memory-test
+          timeout 15s /tmp/tls-memory-test
       - name: Build production poll helper regression
         run: g++ -std=c++14 -pthread -Wall -Wextra tests/wss/websocket_poll_test.cpp -o /tmp/wss-poll-test
       - name: Exercise simultaneous read/send failure and graceful close

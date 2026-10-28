@@ -45,3 +45,33 @@ was captured, not proof of a healthy connection. The transport error tracker is
 read before abort closes it. No addresses, credentials or packet contents are
 logged by this diagnostic helper. Wi-Fi state transitions and disconnect uptime /
 ACK ages are logged by the gateway. Reconnect and heartbeat timings are unchanged.
+
+2026-10-28: a hardware capture showed the small printf prints `%llu` incorrectly,
+shifting the fields that follow it. Diagnostics now use 32-bit unsigned uptime
+milliseconds (wraps after about 49.7 days) and include free/largest internal 8-bit
+heap at the failure site. This adds observability; it does not change allocation
+policy, TLS verification, retry timing or reset behavior.
+
+## Reserved TLS record buffers (2.7.15.2910, generation 19)
+
+The gateway reserves two internal-RAM, 16-byte-aligned record buffers in BSS,
+sized from the pinned mbedTLS headers. The current SDK requests 16,717 bytes
+for each input/output record in `mbedtls_ssl_setup` (also checked in the ELF).
+The slots survive WebSocket teardown, so general-heap fragmentation cannot
+prevent these two allocations on reconnect. They are cleared before reuse and
+on release. Their memory is reserved even while the gateway is disconnected;
+this trades idle free heap for a stable TLS allocation budget.
+
+The mbedTLS platform allocator routes only matching-size allocations by the
+current gateway WebSocket task to these slots. Unrelated tasks and all other
+sizes retain `esp_mbedtls_mem_calloc/free`, including its memory capabilities.
+The free callback recognizes reserved addresses regardless of the freeing task,
+because teardown can run on the gateway control task. Atomic slot ownership
+prevents aliasing; full slots fall back to the original allocator. Certificate
+validation, TLS record limits, protocol and reconnect timings are unchanged.
+
+Native tests compile the actual routing wrapper with SDK adapters. They deny
+large general-heap allocations as a fragmentation model, then check 1,000
+record-buffer reuse cycles, task isolation, fallback ownership, zeroing,
+overflow and concurrent pool use. This is allocator fault injection, not a
+measurement of ESP32 fragmentation or a substitute for on-device TLS tests.
