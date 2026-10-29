@@ -631,6 +631,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
         if (!(mv.flags & 2)) { setNumber(n.get(), "lat", mv.lat); setNumber(n.get(), "lon", mv.lon); }
         if (mv.flags & 16) setNumber(n.get(), "alt", mv.altitude);
         if (mv.flags & 32) setNumber(n.get(), "heartRate", mv.heartRate);
+        else if (!(mv.flags & (1 | 2))) cJSON_DeleteItemFromObjectCaseSensitive(n.get(), "heartRate");
         if (!(mv.flags & (1 | 2))) publishNode(n.release());
         if (mv.flags & (1 | 2 | 4)) {
             auto msg = cJSON_CreateObject();

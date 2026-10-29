@@ -289,6 +289,15 @@ int main(int argc, char **argv) {
     CHECK(std::string(sget(n, "nodeKey")) == "!aabbccdd_mv"); CHECK(nget(n, "alt") == -20 && nget(n, "heartRate") == 101);
     CHECK(nget(n, "lastUpdateMs") >= 1577836800000.0);
     size_t events = testSent.size(); g.handleReceived(p); flush(g); CHECK(testSent.size() == events);
+    // A fresh beacon without HR clears the cached sample; restore on the next valid sample.
+    payload.flags = 16; p.id++;
+    p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes));
+    g.handleReceived(p); result = lastEvent(g, "NODE_UPDATE");
+    CHECK(!cJSON_GetObjectItem(cJSON_GetObjectItem(result.get(), "node"), "heartRate"));
+    payload.flags = 16 | 32; p.id++;
+    p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes));
+    g.handleReceived(p); result = lastEvent(g, "NODE_UPDATE");
+    CHECK(nget(cJSON_GetObjectItem(result.get(), "node"), "heartRate") == 101);
     // Offline reception is cached and replayed after a successful auth.
     g.authenticated = false; p.id++; payload.name = "Offline";
     p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes)); g.handleReceived(p);
