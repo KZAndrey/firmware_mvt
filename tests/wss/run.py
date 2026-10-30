@@ -16,6 +16,9 @@ zig = str(Path(args.zig).resolve())
 build = root / '.tools' / 'wss-tests'
 build.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ, ZIG_LOCAL_CACHE_DIR=str(build / 'cache'), ZIG_GLOBAL_CACHE_DIR=str(build / 'global-cache'))
+worker_test = build / 'transport_worker_test.exe'
+subprocess.run([zig, 'c++', '-std=c++14', '-O0', '-DHAS_MVT_WSS_GATEWAY=1', '-Itests/wss/worker-stubs', '-Isrc', 'tests/wss/transport_worker_test.cpp', 'src/platform/esp32/MvtWssTransport.cpp', '-o', str(worker_test)], env=env, check=True)
+subprocess.run([str(worker_test)], check=True)
 tls_test = build / 'tls_buffer_test.exe'
 subprocess.run([zig, 'c++', '-std=c++14', '-O0', '-Itests/tls-memory/stubs', '-Isrc',
                 'tests/tls-memory/buffer_test.cpp', 'src/platform/esp32/MvtTlsMemory.cpp',
@@ -25,6 +28,9 @@ poll_test = build / 'websocket_poll_test.exe'
 subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/websocket_poll_test.cpp',
                 '-o', str(poll_test)], env=env, check=True)
 subprocess.run([str(poll_test)], check=True)
+control_test = build / 'websocket_control_test.exe'
+subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/websocket_control_test.cpp', '-o', str(control_test)], env=env, check=True)
+subprocess.run([str(control_test)], check=True)
 receive_test = build / 'websocket_receive_test.exe'
 subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/websocket_receive_test.cpp',
                 '-o', str(receive_test)], env=env, check=True)

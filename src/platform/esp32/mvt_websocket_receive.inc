@@ -45,8 +45,8 @@ static esp_err_t esp_websocket_client_recv(esp_websocket_client_handle_t client)
     if (client->last_opcode == WS_TRANSPORT_OPCODES_PING) {
         const char *data = (client->payload_len == 0) ? NULL : client->rx_buffer;
         ESP_LOGD(TAG, "Sending PONG with payload len=%d", client->payload_len);
-        esp_transport_ws_send_raw(client->transport, WS_TRANSPORT_OPCODES_PONG | WS_TRANSPORT_OPCODES_FIN, data, client->payload_len,
-                                  client->config->network_timeout_ms);
+        if (client->payload_len > client->buffer_size ||
+            !mvt_websocket_send_control(client, WS_TRANSPORT_OPCODES_PONG, data, client->payload_len)) return ESP_FAIL;
     } else if (client->last_opcode == WS_TRANSPORT_OPCODES_PONG) {
         client->wait_for_pong_resp = false;
     } else if (client->last_opcode == WS_TRANSPORT_OPCODES_CLOSE) {

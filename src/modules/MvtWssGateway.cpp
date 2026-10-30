@@ -154,6 +154,8 @@ MvtWssGateway::MvtWssGateway() : MeshModule("mvt_wss"), concurrency::OSThread("m
 }
 MvtWssGateway::~MvtWssGateway() {
     disconnectWs();
+    transport.shutdown();
+    finishDisconnect();
     if (incoming) vQueueDelete(incoming);
     mvtWssGateway = nullptr;
 }
@@ -218,23 +220,27 @@ void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
 }
 void MvtWssGateway::disconnectWs() {
     mvtOtaUpdater.onDisconnect();
-    if (wsClient) {
-        esp_websocket_client_stop(wsClient); esp_websocket_client_destroy(wsClient); wsClient = nullptr;
-        // FreeRTOS reclaims deleted task stacks in the idle task. Keep the
-        // normal reconnect interval after teardown so old TLS/OTA tasks finish.
-        lastConnectAttemptMs = millis();
-    }
+    retirementNeedsDelay = retirementNeedsDelay || transport.active() || connecting || connectionEnded.load();
+    transport.stop();
+    retiring = true;
     socketConnected = false; authenticated = false; authSent = false;
-    connecting = false; connectionEnded = false; lastServerAckMs = 0;
+    connecting = false; lastServerAckMs = 0;
     snapshot.clear();
-    // stop/destroy above has joined the receiver: release its largest frame
-    // allocation rather than retaining it while the next TLS session allocates.
+    if (!transport.active()) finishDisconnect();
+}
+void MvtWssGateway::finishDisconnect() {
+    // Receiver has joined: releasing its frame is now safe without waiting.
     std::string().swap(frame); frameExpected = 0; inputFault = false;
+    socketConnected = false; authenticated = false; authSent = false;
+    connectionEnded = false; peerRejected = false;
     char *p;
     while (incoming && xQueueReceive(incoming, &p, 0) == pdTRUE) free(p);
+    retiring = false;
+    if (retirementNeedsDelay) lastConnectAttemptMs = millis();
+    retirementNeedsDelay = false;
 }
 void MvtWssGateway::connectWs() {
-    if (wsClient) { disconnectWs(); return; }
+    if (transport.active()) { disconnectWs(); return; }
     if (mvtOtaUpdater.workerRunning()) return;
     LOG_INFO("MVT WSS connect heap=%u largest=%u",ESP.getFreeHeap(),ESP.getMaxAllocHeap());
     std::string url = configuredAddress.empty() ? "wss://movetain.app/ws" : configuredAddress;
@@ -243,28 +249,18 @@ void MvtWssGateway::connectWs() {
     if (hostEnd == std::string::npos) url += "/ws";
     // Relay keys must never be sent in cleartext.
     if (url.compare(0, 6, "wss://") != 0) { authBlocked = true; displayError = "BADURL"; LOG_WARN("MVT requires wss://"); return; }
-    esp_websocket_client_config_t cfg = {};
-    cfg.uri = url.c_str(); cfg.cert_pem = MVT_ROOT_CA;
-    cfg.task_stack = 6144; cfg.buffer_size = 2048;
-    cfg.ping_interval_sec = 20; cfg.pingpong_timeout_sec = 45;
-    cfg.disable_auto_reconnect = true;
-    wsClient = esp_websocket_client_init(&cfg);
-    if (!wsClient) return;
+    if (!transport.start(url, MVT_ROOT_CA, configurationEpoch)) return;
     connecting = true; connectStartedMs = millis(); connectionEnded = false;
-    esp_websocket_register_events(wsClient, WEBSOCKET_EVENT_ANY, handleWsEvent, this);
-    if (esp_websocket_client_start(wsClient) != ESP_OK) disconnectWs();
 }
 bool MvtWssGateway::sendDocument(cJSON *p) {
     std::string text = serialize(p);
-    if (!socketConnected || !wsClient || inputFault || text.empty()) return false;
-    int written = esp_websocket_client_send_text(wsClient, text.c_str(), text.size(), pdMS_TO_TICKS(1000));
-    // The SDK returns -1 if it cannot acquire the send mutex, without writing
-    // any frame bytes. A transport write failure aborts the SDK connection.
-    // Retain queued messages on contention instead of tearing down healthy TLS.
-    if (written < 0 && esp_websocket_client_is_connected(wsClient)) return false;
-    // Do not keep writing on a potentially partial websocket frame.
-    if (written != int(text.size())) inputFault = true;
-    return written == int(text.size());
+    if (!socketConnected || retiring || inputFault || text.empty()) return false;
+    const std::string type = str(p, "type");
+    const bool priority = type == "AUTH_GATEWAY" || type == "GATEWAY_HEARTBEAT";
+    // Regenerate node state/snapshots after reconnect; replay unsent application
+    // events only within the same room/configuration epoch.
+    const bool replay = !priority && type != "NODE_UPDATE" && !cJSON_IsTrue(get(p, "snapshot"));
+    return transport.send(text, priority, replay);
 }
 void MvtWssGateway::publish(cJSON *p) {
     auto owned = json(p);
@@ -712,17 +708,26 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
     const std::string type = str(j.get(), "type");
     if (type == "ERROR") {
         const std::string code = str(j.get(), "code");
-        if (code == "NOT_AUTHENTICATED") { authenticated = false; authSent = false; return; }
-        if (!authenticated || code == "GATEWAY_REPLACED" || code == "INVALID_RELAY_KEY" || code == "ADMIN_RESTRICTED")
+        const bool permanent = code == "INVALID_RELAY_KEY" || code == "INVALID_AUTH" ||
+            code == "INVALID_ROOM_ID" || code == "ROOM_NOT_FOUND" || code == "GATEWAY_REPLACED" ||
+            code == "ADMIN_RESTRICTED" || code == "ROOM_ACCESS_CHANGED" || code == "ACCOUNT_DELETING";
+        if (permanent) {
             authBlocked = true;
-        if (authBlocked) displayError = code == "INVALID_RELAY_KEY" ? "BADKEY" : code == "ROOM_NOT_FOUND" ? "NOROOM" :
-            code == "GATEWAY_REPLACED" ? "TAKEN" : code == "ADMIN_RESTRICTED" ? "BLOCK" : "FAIL";
+            displayError = code == "INVALID_RELAY_KEY" ? "BADKEY" : code == "ROOM_NOT_FOUND" ? "NOROOM" :
+                code == "GATEWAY_REPLACED" ? "TAKEN" : "BLOCK";
+        } else if (!authenticated || code == "NOT_AUTHENTICATED") {
+            // Temporary errors never latch authBlocked. Failed-auth throttling
+            // on the Relay expires after fifteen minutes.
+            retryDelayMs = code == "RATE_LIMITED" ? 900000 : 30000;
+            displayError = nullptr;
+            disconnectWs();
+        }
         return;
     }
     if (type == "AUTH_GATEWAY_SUCCESS") {
         // The persisted device setting is authoritative on reconnect.
         if (!authSent) return;
-        authenticated = true; displayError = nullptr; snapshotPending = true; lastServerAckMs = millis();
+        authenticated = true; displayError = nullptr; retryDelayMs = 15000; snapshotPending = true; lastServerAckMs = millis();
         LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0;
         // The ACK provides server time even on devices without GPS/NTP.
         sendHeartbeat();if(mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));return;
@@ -1036,9 +1041,21 @@ int32_t MvtWssGateway::runOnce() {
     if(mvtOtaUpdater.changed()&&authenticated&&mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));
     std::string room = moduleConfig.mqtt.username, secret = moduleConfig.mqtt.password, addr = moduleConfig.mqtt.address;
     if (room != configuredRoom || secret != configuredKey || addr != configuredAddress) {
-        disconnectWs(); authBlocked = false; displayError = nullptr;
+        ++configurationEpoch;
+        disconnectWs(); authBlocked = false; displayError = nullptr; retryDelayMs = 15000;
         outgoing.clear(); pending.clear(); polls.clear(); airPolls.clear(); completedCommands.clear();
         configuredRoom = room; configuredKey = secret; configuredAddress = addr;
+    }
+    std::string failed; uint32_t failedEpoch;
+    while (transport.takeFailed(failed, failedEpoch)) {
+        if (failedEpoch == configurationEpoch) {
+            if (outgoing.size() == MAX_EVENTS) outgoing.pop_front();
+            outgoing.push_back(std::move(failed));
+        }
+    }
+    if (retiring) {
+        if (transport.active()) return 100;
+        finishDisconnect();
     }
     for (auto it = pending.begin(); it != pending.end();) {
         if (it->id && uint32_t(millis() - it->started) >= (it->kind=="chat"||it->kind=="latechat"?ACK_TIMEOUT:it->timeout)) {
@@ -1063,15 +1080,18 @@ int32_t MvtWssGateway::runOnce() {
     char *text = nullptr;
     for (int i = 0; i < 8 && incoming && xQueueReceive(incoming, &text, 0) == pdTRUE; ++i) {
         handleIncomingCommand(text); free(text);
+        if (retiring) break;
     }
+    if (retiring) return 100;
     advanceAirPolls();
     advancePolls();
     advanceSingles();
     if(uint32_t(millis()-lastDiagnosticState)>=1000){sendDiagnosticStates();lastDiagnosticState=millis();
         if(mvtOtaUpdater.active()&&screen){screen->setOn(true);screen->forceDisplay();}}
     if (peerRejected) { authBlocked = true; if (!displayError) displayError = "BLOCK"; peerRejected = false; }
+    if (connectionEnded) { disconnectWs(); return 100; }
     if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked || inputFault) {
-        if (wsClient) disconnectWs();
+        if (transport.active()) disconnectWs();
         if (!moduleConfig.mqtt.enabled) { authBlocked = false; displayError = nullptr; }
         return 1000;
     }
@@ -1079,7 +1099,7 @@ int32_t MvtWssGateway::runOnce() {
         mvtOtaUpdater.onDisconnect();
         if(mvtOtaUpdater.workerRunning())return 100;
         authenticated = false; authSent = false;
-        if (wsClient) {
+        if (transport.active()) {
             // Do not repeatedly destroy a TLS handshake just because the retry
             // interval elapsed. A closed client, however, must be retired now.
             if (connectionEnded || !connecting || uint32_t(millis()-connectStartedMs)>=30000) {
@@ -1088,18 +1108,18 @@ int32_t MvtWssGateway::runOnce() {
             }
             return 100;
         }
-        if (uint32_t(millis() - lastConnectAttemptMs) > 15000) { lastConnectAttemptMs = millis(); connectWs(); }
+        if (uint32_t(millis() - lastConnectAttemptMs) > retryDelayMs) { lastConnectAttemptMs = millis(); connectWs(); }
         return 100;
     }
     connecting = false;
-    if (connectionEnded || (wsClient && !esp_websocket_client_is_connected(wsClient)) ||
+    if (connectionEnded || !transport.connected() ||
         (authenticated && uint32_t(millis()-lastServerAckMs)>=75000)) {
         LOG_WARN("MVT WSS unhealthy ackAge=%u heap=%u largest=%u",unsigned(millis()-lastServerAckMs),ESP.getFreeHeap(),ESP.getMaxAllocHeap());
         disconnectWs(); return 100;
     }
     if (!authSent) sendAuthGateway();
     if (!authenticated) {
-        if (authSent && uint32_t(millis() - authStartedMs) > 10000) disconnectWs();
+        if (authSent && uint32_t(millis() - authStartedMs) > 30000) disconnectWs();
         return 100;
     }
     if (uint32_t(millis() - lastHeartbeatMs) >= 15000) sendHeartbeat();

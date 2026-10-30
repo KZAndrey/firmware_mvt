@@ -100,9 +100,9 @@ int main(int argc, char **argv) {
     meshtastic_NodeInfoLite peer = {}; peer.num = 0xaabbccdd; peer.channel = 2;
     peer.last_heard = 1700000000; peer.has_user = true; strcpy(peer.user.short_name, "A"); db.nodes.push_back(peer);
     MvtWssGateway g;
-    testOtaWorkerRunning=true;healthyTick(g);CHECK(g.wsClient==nullptr);
+    testOtaWorkerRunning=true;healthyTick(g);CHECK(g.transport.client==nullptr);
     testOtaWorkerRunning=false;
-    healthyTick(g); CHECK(g.wsClient != nullptr); CHECK(!g.authenticated);
+    healthyTick(g); CHECK(g.transport.client != nullptr); CHECK(!g.authenticated);
     g.socketConnected = true; healthyTick(g); CHECK(g.authSent);
     CHECK(std::string(sget(parse(testSent.back()).get(), "type")) == "AUTH_GATEWAY");
     command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":42,\"text\":\"blocked\"}"); CHECK(radio.sent.empty());
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
         auto e=parse("{\"type\":\"TEST_CONTENTION\"}");
         testSendBusy=true;CHECK(!g.sendDocument(e.get()));CHECK(!g.inputFault);CHECK(g.socketConnected);
         testSendBusy=false;CHECK(g.sendDocument(e.get()));
-        testSendFailure=true;CHECK(!g.sendDocument(e.get()));CHECK(g.inputFault);
+        testSendFailure=true;CHECK(!g.sendDocument(e.get()));CHECK(!g.inputFault);
         testSendFailure=false;g.inputFault=false;
         testSent.pop_back();
     }
@@ -456,7 +456,7 @@ int main(int argc, char **argv) {
         near.has_user=true;strcpy(near.user.long_name,"Near");db.nodes.push_back(near);
         config.lora.use_preset=true;config.lora.modem_preset=meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST;
         MvtWssGateway adaptive;adaptive.authenticated=true;adaptive.socketConnected=true;adaptive.authSent=true;
-        adaptive.wsClient=esp_websocket_client_init(nullptr);adaptive.serverTimeMs=1700000000000ULL;adaptive.serverTimeTick=testMillis;
+        adaptive.transport.client=esp_websocket_client_init(nullptr);adaptive.serverTimeMs=1700000000000ULL;adaptive.serverTimeTick=testMillis;
         adaptive.configuredRoom=moduleConfig.mqtt.username;adaptive.configuredKey=moduleConfig.mqtt.password;adaptive.configuredAddress=moduleConfig.mqtt.address;
         CHECK(adaptive.diagnosticStep(near.num)==3000);
         CHECK(adaptive.diagnosticTimeout(near.num,2)==123000);
@@ -489,7 +489,7 @@ int main(int argc, char **argv) {
     // AIR SENSOR: two typed requests; only fresh, addressed sensor packets count.
     {
         MvtWssGateway airG;airG.authenticated=true;airG.socketConnected=true;airG.authSent=true;
-        airG.wsClient=esp_websocket_client_init(nullptr);airG.serverTimeMs=1700000000000ULL;airG.serverTimeTick=testMillis;
+        airG.transport.client=esp_websocket_client_init(nullptr);airG.serverTimeMs=1700000000000ULL;airG.serverTimeTick=testMillis;
         airG.configuredRoom=moduleConfig.mqtt.username;airG.configuredKey=moduleConfig.mqtt.password;airG.configuredAddress=moduleConfig.mqtt.address;
         command(airG,"{\"type\":\"CMD_POLL_AIR\",\"targetNodeId\":2864434397}");
         CHECK(airG.airPolls.size()==1);CHECK(airG.airPolls.front().sent==1);
@@ -549,19 +549,19 @@ int main(int argc, char **argv) {
         reconnect.configuredRoom=moduleConfig.mqtt.username;
         reconnect.configuredKey=moduleConfig.mqtt.password;
         reconnect.configuredAddress=moduleConfig.mqtt.address;
-        testMillis+=20000;reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
+        testMillis+=20000;reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
         auto created=testWsCreated;
-        testMillis+=16000;reconnect.runOnce();CHECK(testWsCreated==created&&reconnect.wsClient!=nullptr);
-        testMillis+=14000;reconnect.runOnce();CHECK(reconnect.wsClient==nullptr);
+        testMillis+=16000;reconnect.runOnce();CHECK(testWsCreated==created&&reconnect.transport.client!=nullptr);
+        testMillis+=14000;reconnect.runOnce();CHECK(reconnect.transport.client==nullptr);
         for(int cycle=0;cycle<50;++cycle){
-            testMillis+=15001;reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
+            testMillis+=15001;reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
             MvtWssGateway::handleWsEvent(&reconnect,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
             reconnect.runOnce();CHECK(reconnect.authSent);
             reconnect.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");CHECK(reconnect.authenticated);
             reconnect.frame.reserve(8192);
             auto destroyed=testWsDestroyed;
             MvtWssGateway::handleWsEvent(&reconnect,nullptr,cycle%2?WEBSOCKET_EVENT_CLOSED:WEBSOCKET_EVENT_DISCONNECTED,nullptr);
-            reconnect.runOnce();CHECK(reconnect.wsClient==nullptr);CHECK(testWsDestroyed==destroyed+1);
+            reconnect.runOnce();CHECK(reconnect.transport.client==nullptr);CHECK(testWsDestroyed==destroyed+1);
             CHECK(!reconnect.authenticated&&reconnect.frame.empty());
             CHECK(reconnect.frame.capacity()<8192);
             created=testWsCreated;testMillis+=14999;reconnect.runOnce();CHECK(testWsCreated==created);
@@ -570,9 +570,9 @@ int main(int argc, char **argv) {
         MvtWssGateway::handleWsEvent(&reconnect,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
         reconnect.runOnce();reconnect.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");
         testMillis+=74000;reconnect.handleIncomingCommand("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}");
-        reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
-        testMillis+=75000;reconnect.runOnce();CHECK(reconnect.wsClient==nullptr);CHECK(!reconnect.authenticated);
-        testMillis+=15001;reconnect.runOnce();CHECK(reconnect.wsClient!=nullptr);
+        reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
+        testMillis+=75000;reconnect.runOnce();CHECK(reconnect.transport.client==nullptr);CHECK(!reconnect.authenticated);
+        testMillis+=15001;reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
     }
     // Replay the gateway-visible result of TLS setup allocation failure:
     // DISCONNECTED before CONNECTED/AUTH. This is fault injection, not an
@@ -591,12 +591,12 @@ int main(int argc, char **argv) {
             const auto sentBefore=testSent.size();
             for (int attempt=0;attempt<failures;++attempt) {
                 testMillis+=attempt==0?15001:1;retry.runOnce();
-                CHECK(retry.wsClient&&retry.connecting&&!retry.authSent);
+                CHECK(retry.transport.client&&retry.connecting&&!retry.authSent);
                 // The TLS worker fails before a WebSocket connection exists.
                 testMillis+=200;
                 MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_DISCONNECTED,nullptr);
                 retry.runOnce();
-                CHECK(!retry.wsClient&&!retry.connecting&&!retry.authenticated);
+                CHECK(!retry.transport.client&&!retry.connecting&&!retry.authenticated);
                 CHECK(testWsCreated-createdBefore==attempt+1);
                 CHECK(testWsDestroyed-destroyedBefore==attempt+1);
                 CHECK(WiFi.status()==WL_CONNECTED);
@@ -607,7 +607,7 @@ int main(int argc, char **argv) {
             }
             // Allocation succeeds later: authenticate on the same gateway
             // instance and deliver the buffered event without reset/reconfigure.
-            testMillis+=1;retry.runOnce();CHECK(retry.wsClient!=nullptr);
+            testMillis+=1;retry.runOnce();CHECK(retry.transport.client!=nullptr);
             MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
             retry.runOnce();CHECK(retry.authSent&&!retry.authenticated);
             CHECK(std::string(sget(parse(testSent.back()).get(),"type"))=="AUTH_GATEWAY");
@@ -636,12 +636,36 @@ int main(int argc, char **argv) {
         retry.configuredAddress=moduleConfig.mqtt.address;
         auto created=testWsCreated,destroyed=testWsDestroyed;
         testWsInitFailure=true;testMillis+=15001;retry.runOnce();
-        CHECK(!retry.wsClient&&testWsCreated==created&&testWsDestroyed==destroyed);
+        CHECK(!retry.transport.client&&testWsCreated==created&&testWsDestroyed==destroyed);
         testWsInitFailure=false;testWsStartFailure=true;
         testMillis+=15001;retry.runOnce();
-        CHECK(!retry.wsClient&&testWsCreated==created+1&&testWsDestroyed==destroyed+1);
+        CHECK(!retry.transport.client&&testWsCreated==created+1&&testWsDestroyed==destroyed+1);
         testWsStartFailure=false;testMillis+=15001;retry.runOnce();
-        CHECK(retry.wsClient&&retry.connecting);
+        CHECK(retry.transport.client&&retry.connecting);
+    }
+    // Temporary admission failures recover on the same instance; permanent
+    // credential/policy failures never enter a retry storm.
+    for (const char *code : {"ROOM_LIMIT_REACHED", "ROOM_LOAD_UNAVAILABLE", "RATE_LIMITED", "UNKNOWN_TEMPORARY"}) {
+        MvtWssGateway retry;
+        retry.configuredRoom=moduleConfig.mqtt.username;retry.configuredKey=moduleConfig.mqtt.password;
+        retry.configuredAddress=moduleConfig.mqtt.address;
+        testMillis+=20000;retry.runOnce();CHECK(retry.transport.active());
+        MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
+        retry.runOnce();CHECK(retry.authSent);
+        std::string message=std::string("{\"type\":\"ERROR\",\"code\":\"")+code+"\"}";
+        retry.handleIncomingCommand(message.c_str());CHECK(!retry.authBlocked&&!retry.authenticated);
+        auto created=testWsCreated;testMillis+=retry.retryDelayMs;retry.runOnce();CHECK(testWsCreated==created);
+        testMillis+=1;retry.runOnce();CHECK(testWsCreated==created+1);
+        MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);retry.runOnce();
+        retry.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");CHECK(retry.authenticated);
+        CHECK(retry.retryDelayMs==15000);
+    }
+    for (const char *code : {"INVALID_RELAY_KEY", "ROOM_NOT_FOUND", "GATEWAY_REPLACED", "ADMIN_RESTRICTED"}) {
+        MvtWssGateway blocked;blocked.configuredRoom=moduleConfig.mqtt.username;blocked.configuredKey=moduleConfig.mqtt.password;
+        blocked.configuredAddress=moduleConfig.mqtt.address;
+        std::string message=std::string("{\"type\":\"ERROR\",\"code\":\"")+code+"\"}";
+        blocked.handleIncomingCommand(message.c_str());auto created=testWsCreated;
+        testMillis+=3600000;blocked.runOnce();CHECK(blocked.authBlocked&&testWsCreated==created);
     }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {

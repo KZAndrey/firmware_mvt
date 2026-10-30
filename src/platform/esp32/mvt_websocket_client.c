@@ -20,6 +20,7 @@
 #include "esp_tls.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
+#include "esp_random.h"
 #include "esp_heap_caps.h"
 #include "MvtTlsMemory.h"
 
@@ -125,6 +126,7 @@ struct esp_websocket_client {
     TaskHandle_t                task_handle;
     esp_transport_list_handle_t transport_list;
     esp_transport_handle_t      transport;
+    esp_transport_handle_t      control_transport;
     websocket_config_storage_t *config;
     websocket_client_state_t    state;
     uint64_t                    keepalive_tick_ms;
@@ -593,6 +595,7 @@ esp_err_t esp_websocket_client_set_uri(esp_websocket_client_handle_t client, con
     return ESP_OK;
 }
 
+#include "mvt_websocket_control.inc"
 #include "mvt_websocket_receive.inc"
 
 static int esp_websocket_client_send_with_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout);
@@ -612,6 +615,8 @@ static void esp_websocket_client_task(void *pv)
     esp_websocket_client_handle_t client = (esp_websocket_client_handle_t) pv;
     //get transport by scheme
     client->transport = esp_transport_list_get_transport(client->transport_list, client->config->scheme);
+    // Resolve before connecting: the SDK getter resets WS receive state.
+    if (client->transport) client->control_transport = esp_transport_get_payload_transport_handle(client->transport);
 
     if (client->transport == NULL) {
         ESP_LOGE(TAG, "There are no transports valid, stop websocket client");
@@ -658,7 +663,10 @@ static void esp_websocket_client_task(void *pv)
                     if (_tick_get_ms() - client->ping_tick_ms > client->config->ping_interval_sec*1000) {
                         client->ping_tick_ms = _tick_get_ms();
                         ESP_LOGD(TAG, "Sending PING...");
-                        esp_transport_ws_send_raw(client->transport, WS_TRANSPORT_OPCODES_PING | WS_TRANSPORT_OPCODES_FIN, NULL, 0, client->config->network_timeout_ms);
+                        if (!mvt_websocket_send_control(client, WS_TRANSPORT_OPCODES_PING, NULL, 0)) {
+                            esp_websocket_client_abort_connection(client);
+                            break;
+                        }
 
                         if (!client->wait_for_pong_resp && client->config->pingpong_timeout_sec) {
                             client->pingpong_tick_ms = _tick_get_ms();
@@ -704,7 +712,10 @@ static void esp_websocket_client_task(void *pv)
                 // if closing not initiated by the client echo the close message back
                 if ((CLOSE_FRAME_SENT_BIT & xEventGroupGetBits(client->status_bits)) == 0) {
                     ESP_LOGD(TAG, "Closing initiated by the server, sending close frame");
-                    esp_transport_ws_send_raw(client->transport, WS_TRANSPORT_OPCODES_CLOSE | WS_TRANSPORT_OPCODES_FIN, NULL, 0, client->config->network_timeout_ms);
+                    if (!mvt_websocket_send_control(client, WS_TRANSPORT_OPCODES_CLOSE, NULL, 0)) {
+                        esp_websocket_client_abort_connection(client);
+                        break;
+                    }
                     xEventGroupSetBits(client->status_bits, CLOSE_FRAME_SENT_BIT);
                 }
                 break;
@@ -897,7 +908,7 @@ static int esp_websocket_client_send_with_opcode(esp_websocket_client_handle_t c
         // send with ws specific way and specific opcode
         wlen = esp_transport_ws_send_raw(client->transport, current_opcode, (char *)client->tx_buffer, need_write,
                                         (timeout==portMAX_DELAY)? -1 : timeout * portTICK_PERIOD_MS);
-        if (wlen < 0 || (wlen == 0 && need_write != 0)) {
+        if (wlen != need_write) {
             ret = wlen;
             mvt_ws_diagnostic(client, "write", ret, errno);
             ESP_LOGE(TAG, "Network error: esp_transport_write() returned %d, errno=%d", ret, errno);

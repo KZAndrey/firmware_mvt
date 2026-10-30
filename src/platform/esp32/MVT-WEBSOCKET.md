@@ -1,5 +1,37 @@
 # WSS transport lifetime patch
 
+## Recovery and asynchronous transport (2.7.15.3010, generation 21)
+
+`MvtWssTransport` owns SDK startup, writes and stop/destroy on a dedicated task.
+The mesh loop only submits messages or requests shutdown; it never waits for a
+TLS mutex, write or receiver join. The queue admits at most eight messages and
+16 KiB of payload, including the in-flight message and undelivered results.
+Authentication and heartbeats precede queued data. Failed, unsent application
+events return to the mesh loop with a configuration epoch; a room/key/address
+change discards old-epoch events. Node snapshots are regenerated on reconnect.
+The receiver must finish before its partial frame can be released or a new SDK
+client started. Late callbacks during retirement cannot revive the old session.
+
+Temporary authentication errors retry after 30 seconds; failed-auth throttling
+waits 15 minutes. Invalid credentials, missing room and explicit access/replacement
+denials remain blocked until settings change or the gateway is re-enabled.
+The authentication response deadline is 30 seconds. Application ACK and WebSocket
+Pong deadlines are 75 seconds, with heartbeats every 15 seconds and Ping every 20.
+Relay now measures 75 seconds of inactivity using a monotonic clock, checking
+every five seconds; sending Ping does not count as received activity.
+
+Control frames use a bounded masked wire buffer on the cached TLS/TCP parent.
+This distinguishes a successfully written empty Ping/Pong from the SDK raw-send
+API's ambiguous zero return on poll timeout. Timeout, error or incomplete control
+write retires the connection. A short data-frame write also retires it instead of
+appending a new WS header to an incomplete payload. TLS verification is unchanged.
+
+Host regressions execute the production worker with blocked send/stop adapters,
+queue exhaustion, priority, failed-event replay, reconnect and late callbacks;
+production control-frame code is tested with empty, partial and failed writes.
+Gateway tests cover temporary refusal and permanent denial separately. These
+tests do not substitute for a powered-device soak test on the actual network.
+
 `mvt_websocket_client.c` is the Apache-2.0 ESP-IDF v4.4.7 component:
 https://github.com/espressif/esp-idf/blob/v4.4.7/components/esp_websocket_client/esp_websocket_client.c
 

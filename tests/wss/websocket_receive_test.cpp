@@ -29,7 +29,8 @@ int esp_transport_read(int,char*,int,int){
 int esp_transport_ws_get_read_payload_len(int){return mode==3?1000:mode==4?0:8;}
 int esp_transport_ws_get_read_opcode(int){return mode==5||(mode==6&&calls>1)?WS_TRANSPORT_OPCODES_NONE:mode==4?WS_TRANSPORT_OPCODES_PING:42;}
 void esp_websocket_client_dispatch_event(Client*,int,char*,int){++events;}
-int esp_transport_ws_send_raw(int,int,const char*,int,int){return 0;}
+bool controlSuccess=true;
+bool mvt_websocket_send_control(Client*,int,const char*,int){return controlSuccess;}
 #include "../../src/platform/esp32/mvt_websocket_receive.inc"
 int main(){
     for(mode=0;mode<8;++mode){Client c;active=&c;tick=0;calls=events=0;diagnosticStage.clear();diagnosticErrno=0;
@@ -40,5 +41,7 @@ int main(){
         if(mode==7){assert(diagnosticStage=="read"&&diagnosticErrno==ECONNRESET);}
         if(mode==1)assert(diagnosticStage=="partial_frame_stalled");
     }
+    Client c;active=&c;mode=4;tick=0;calls=events=0;controlSuccess=false;
+    assert(esp_websocket_client_recv(&c)==ESP_FAIL); // failed PONG retires socket
     puts("PASS receive: chunks, no progress, stop, frame deadline, empty ping, idle and partial timeouts");
 }

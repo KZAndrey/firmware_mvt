@@ -2,7 +2,8 @@
 #if HAS_MVT_WSS_GATEWAY
 #include "MeshModule.h"
 #include "concurrency/OSThread.h"
-#include "esp_websocket_client.h"
+#include "platform/esp32/MvtWssTransport.h"
+#include <atomic>
 #include <WiFi.h>
 #include <cJSON.h>
 #include <deque>
@@ -63,17 +64,20 @@ private:
     void airResult(const AirPoll &, bool, const char * = nullptr);
     std::deque<Poll> polls;
     void advancePolls();
-    esp_websocket_client_handle_t wsClient = nullptr;
+    MvtWssTransport transport{handleWsEvent, this};
+    bool retiring = false, retirementNeedsDelay = false;
+    uint32_t configurationEpoch = 0, retryDelayMs = 15000;
     QueueHandle_t incoming = nullptr;
-    volatile bool socketConnected = false, inputFault = false, peerRejected = false;
-    volatile bool connectionEnded = false;
+    std::atomic<bool> socketConnected{false}, inputFault{false}, peerRejected{false};
+    std::atomic<bool> connectionEnded{false};
     bool connecting = false;
-    uint32_t connectStartedMs = 0, lastServerAckMs = 0;
+    uint32_t connectStartedMs = 0;
+    std::atomic<uint32_t> lastServerAckMs{0}, lastHeartbeatMs{0};
     bool authenticated = false, authSent = false, authBlocked = false;
     bool snapshotPending = false;
     const char *displayError = nullptr;
     int lastWifiStatus = -1;
-    uint32_t lastHeartbeatMs = 0, lastConnectAttemptMs = 0, authStartedMs = 0;
+    uint32_t lastConnectAttemptMs = 0, authStartedMs = 0;
     uint64_t serverTimeMs = 0;
     uint32_t serverTimeTick = 0;
     std::string frame, configuredRoom, configuredKey, configuredAddress;
@@ -86,6 +90,7 @@ private:
     std::deque<uint32_t> completedCommands;
     void connectWs();
     void disconnectWs();
+    void finishDisconnect();
     void receiveFrame(const esp_websocket_event_data_t &);
     bool sendDocument(cJSON *);
     void publish(cJSON *);
