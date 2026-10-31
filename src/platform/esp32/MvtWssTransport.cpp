@@ -109,7 +109,7 @@ void MvtWssTransport::run() {
             if (!inFlight && xQueueReceive(urgent, &inFlight, 0) != pdTRUE)
                 xQueueReceive(pending, &inFlight, 0);
             if (inFlight) {
-                const int sent = esp_websocket_client_send_text(client, inFlight->text, inFlight->size, pdMS_TO_TICKS(1000));
+                const int sent = esp_websocket_client_send_text(client, inFlight->text, inFlight->size, pdMS_TO_TICKS(5000));
                 if (sent == int(inFlight->size)) { release(inFlight); inFlight = nullptr; }
                 else if (!(sent < 0 && esp_websocket_client_is_connected(client))) {
                     // Do not append another frame after a short/failed write.

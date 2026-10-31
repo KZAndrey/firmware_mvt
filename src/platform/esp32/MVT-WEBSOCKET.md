@@ -1,5 +1,18 @@
 # WSS transport lifetime patch
 
+## Write-pressure recovery and retained diagnostics (2.7.15.3110, generation 22)
+
+The IO worker allows 5 seconds for a send. A mutex-protected readiness check
+before any frame bytes permits a safe retry on temporary backpressure. Once
+a frame header or an earlier message fragment may have been sent, ambiguous
+write failures still retire the connection. Receive metadata starts empty for
+each new frame and is retained between its chunks. Numeric failure diagnostics
+survive transport teardown in RAM and accompany the next authentication and
+heartbeats. Relay validates and journals them once per node/boot/sequence.
+Diagnostics do not survive a device reset and do not identify the remote TCP
+closer by themselves. No Wi-Fi power, TLS verification or keep-alive policy
+changes. See tests/wss/RECONNECT.md for fault injection and its limits.
+
 ## Recovery and asynchronous transport (2.7.15.3010, generation 21)
 
 `MvtWssTransport` owns SDK startup, writes and stop/destroy on a dedicated task.

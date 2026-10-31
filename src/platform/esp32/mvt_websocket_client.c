@@ -23,6 +23,7 @@
 #include "esp_random.h"
 #include "esp_heap_caps.h"
 #include "MvtTlsMemory.h"
+#include "MvtWssDiagnostics.h"
 
 #include "esp_websocket_client.h"
 #include "esp_transport.h"
@@ -136,6 +137,7 @@ struct esp_websocket_client {
     int                         wait_timeout_ms;
     int                         auto_reconnect;
     bool                        run;
+    bool                        diagnostic_captured;
     bool                        wait_for_pong_resp;
     EventGroupHandle_t          status_bits;
     xSemaphoreHandle            lock;
@@ -182,12 +184,23 @@ static esp_err_t esp_websocket_client_dispatch_event(esp_websocket_client_handle
 
 // Called under the transport lock, before teardown clears the TLS error tracker.
 // Only numeric diagnostics and constant stage names; never URLs, payloads or credentials.
+#include "mvt_websocket_diagnostics.inc"
 static void mvt_ws_diagnostic(esp_websocket_client_handle_t client, const char *stage, int result, int saved_errno)
 {
     int tls_code = 0, tls_flags = 0, tls_error = 0;
     esp_tls_error_handle_t handle = esp_transport_get_error_handle(client->transport);
     if (handle) tls_error = esp_tls_get_and_clear_last_error(handle, &tls_code, &tls_flags);
     int socket_error = esp_transport_get_errno(client->transport);
+    if (!client->diagnostic_captured) {
+        MvtWssDiagnostic d = {0};
+        snprintf(d.stage, sizeof(d.stage), "%s", stage);
+        d.uptimeMs = (uint32_t)_tick_get_ms(); d.ret = result; d.error = saved_errno;
+        d.socketError = socket_error; d.tlsError = tls_error; d.tlsCode = tls_code; d.tlsFlags = tls_flags;
+        d.opcode = client->last_opcode; d.payload = client->payload_len; d.offset = client->payload_offset;
+        d.duringSession = client->state == WEBSOCKET_STATE_CONNECTED || client->state == WEBSOCKET_STATE_CLOSING;
+        mvt_wss_save_diagnostic(&d);
+        client->diagnostic_captured = true;
+    }
     wifi_ap_record_t ap = {0};
     int wifi_result = esp_wifi_sta_get_ap_info(&ap);
     // The pinned small printf does not support %llu: it also misreads all
@@ -653,6 +666,7 @@ static void esp_websocket_client_task(void *pv)
                 ESP_LOGD(TAG, "Transport connected to %s://%s:%d", client->config->scheme, client->config->host, client->config->port);
 
                 client->state = WEBSOCKET_STATE_CONNECTED;
+                client->diagnostic_captured = false;
                 client->wait_for_pong_resp = false;
                 esp_websocket_client_dispatch_event(client, WEBSOCKET_EVENT_CONNECTED, NULL, 0);
 
@@ -871,60 +885,7 @@ int esp_websocket_client_send_bin(esp_websocket_client_handle_t client, const ch
     return esp_websocket_client_send_with_opcode(client, WS_TRANSPORT_OPCODES_BINARY, (const uint8_t *)data, len, timeout);
 }
 
-static int esp_websocket_client_send_with_opcode(esp_websocket_client_handle_t client, ws_transport_opcodes_t opcode, const uint8_t *data, int len, TickType_t timeout)
-{
-    int need_write = len;
-    int wlen = 0, widx = 0;
-    int ret = ESP_FAIL;
-
-    if (client == NULL || len < 0 ||
-        (opcode != WS_TRANSPORT_OPCODES_CLOSE && (data == NULL || len <= 0))) {
-        ESP_LOGE(TAG, "Invalid arguments");
-        return ESP_FAIL;
-    }
-
-    if (xSemaphoreTakeRecursive(client->lock, timeout) != pdPASS) {
-        ESP_LOGE(TAG, "Could not lock ws-client within %d timeout", timeout);
-        return ESP_FAIL;
-    }
-
-    if (!esp_websocket_client_is_connected(client)) {
-        ESP_LOGE(TAG, "Websocket client is not connected");
-        goto unlock_and_return;
-    }
-
-    if (client->transport == NULL) {
-        ESP_LOGE(TAG, "Invalid transport");
-        goto unlock_and_return;
-    }
-    uint32_t current_opcode = opcode;
-    while (widx < len || current_opcode) {  // allow for sending "current_opcode" only message with len==0
-        if (need_write > client->buffer_size) {
-            need_write = client->buffer_size;
-        } else {
-            current_opcode |= WS_TRANSPORT_OPCODES_FIN;
-        }
-        memcpy(client->tx_buffer, data + widx, need_write);
-        // send with ws specific way and specific opcode
-        wlen = esp_transport_ws_send_raw(client->transport, current_opcode, (char *)client->tx_buffer, need_write,
-                                        (timeout==portMAX_DELAY)? -1 : timeout * portTICK_PERIOD_MS);
-        if (wlen != need_write) {
-            ret = wlen;
-            mvt_ws_diagnostic(client, "write", ret, errno);
-            ESP_LOGE(TAG, "Network error: esp_transport_write() returned %d, errno=%d", ret, errno);
-            esp_websocket_client_abort_connection(client);
-            goto unlock_and_return;
-        }
-        current_opcode = 0;
-        widx += wlen;
-        need_write = len - widx;
-
-    }
-    ret = widx;
-unlock_and_return:
-    xSemaphoreGiveRecursive(client->lock);
-    return ret;
-}
+#include "mvt_websocket_send.inc"
 
 bool esp_websocket_client_is_connected(esp_websocket_client_handle_t client)
 {

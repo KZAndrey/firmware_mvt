@@ -3,6 +3,10 @@ static esp_err_t esp_websocket_client_recv(esp_websocket_client_handle_t client)
     int rlen;
     const uint32_t started = _tick_get_ms();
     client->payload_offset = 0;
+    // Metadata belongs to this frame, never the previous successful read.
+    // Keep it between chunks so a partial-frame failure retains its context.
+    client->last_opcode = WS_TRANSPORT_OPCODES_NONE;
+    client->payload_len = 0;
     do {
         // A peer can drip-feed a frame forever while holding the transport lock.
         // Bound the entire frame and let stop() retire the worker without reboot.

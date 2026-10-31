@@ -1,6 +1,7 @@
 #include "configuration.h"
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtWssGateway.h"
+#include "platform/esp32/MvtWssDiagnosticJson.h"
 #include "MvtRadioTiming.h"
 #include "modules/MvtOtaUpdater.h"
 #include "graphics/Screen.h"
@@ -284,6 +285,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setString(p, "longName", owner.long_name);
     setString(p, "shortName", owner.short_name);
     setString(p, "gatewayType", "WSS");
+    if (auto *diag = mvtWssDiagnosticJson()) cJSON_AddItemToObject(p, "lastDisconnectDiag", diag);
     auto *radio = RadioLibInterface::instance;
     if (radio && radio->getFreq() > 0) {
         char frequency[24]; snprintf(frequency, sizeof(frequency), "%.3f MHz", double(radio->getFreq()));

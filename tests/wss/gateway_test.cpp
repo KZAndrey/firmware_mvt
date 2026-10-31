@@ -16,6 +16,9 @@ RadioLibInterface *RadioLibInterface::instance = &testRadioInfo;
 #include "esp_websocket_client.h"
 #include "concurrency/OSThread.h"
 #include <cJSON.h>
+#include "platform/esp32/MvtWssDiagnostics.h"
+MvtWssDiagnostic testDiagnostic = {};
+bool mvt_wss_last_diagnostic(MvtWssDiagnostic *out) { *out = testDiagnostic; return out->sequence != 0; }
 #define private public
 #define protected public
 #include "modules/MvtWssGateway.h"
@@ -120,6 +123,15 @@ int main(int argc, char **argv) {
     auto initialNode = lastEvent(g, "NODE_UPDATE");
     CHECK(nget(cJSON_GetObjectItem(initialNode.get(), "node"), "lastUpdateMs") == 1700000000000ULL);
     auto gateway = Json(g.gatewayInfo(), cJSON_Delete);
+    CHECK(!cJSON_GetObjectItem(gateway.get(), "lastDisconnectDiag"));
+    testDiagnostic.sequence=1;testDiagnostic.bootId=17;testDiagnostic.tlsError=32776;
+    strcpy(testDiagnostic.stage,"read");
+    auto diagnosticGateway = Json(g.gatewayInfo(), cJSON_Delete);
+    auto *diagnostic = cJSON_GetObjectItem(diagnosticGateway.get(), "lastDisconnectDiag");
+    CHECK(nget(diagnostic,"tlsError")==32776);
+    CHECK(nget(diagnostic,"bootId")==17);
+    CHECK(std::string(sget(diagnostic,"stage"))=="read");
+    testDiagnostic = {};
     CHECK(std::string(sget(gateway.get(), "nodeName")) == "Movetain Host");
     CHECK(std::string(sget(gateway.get(), "shortName")) == "MVT");
     CHECK(std::string(sget(gateway.get(), "frequency")) == "433.175 MHz");

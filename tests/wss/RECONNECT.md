@@ -1,5 +1,45 @@
 # Reconnection regression coverage (2.7.15.1810)
 
+## 2.7.15.3110 write-pressure and diagnostic regression, 2026-10-31
+
+The 3010 sender was extracted unchanged into `mvt_websocket_send.inc` so the
+host tests execute the production function. Negative controls against HEAD
+fail on pre-write backpressure and stale receive metadata. A timed-out mutex
+already retained the worker's in-flight message; that behavior is now tested
+explicitly with a competing reader and repeated busy returns.
+
+The worker's send timeout is now 5 seconds. Under the transport mutex, the
+sender polls the cached TLS/TCP parent before starting a frame. A timeout,
+EAGAIN or EINTR at this boundary is retryable only if no earlier fragment of
+the message has been sent. Fatal preflight errors and every ambiguous short
+or failed `esp_transport_ws_send_raw` still retire the connection. In IDF
+4.4.7 the raw function writes header and payload separately: zero payload
+bytes returned does NOT prove that no header was transmitted. The remaining
+send budget is passed to raw send; IDF applies it to its individual internal
+operations, so it is not a strict whole-call wall-clock deadline.
+
+Tests cover 1.5-second pressure, retry exactly once, real mutex contention,
+zero/negative/short/oversized raw results, failure between fragments,
+continuation opcodes, zero timeout, wrap-safe ticks and stale errno. Receive
+tests check unknown metadata on the first failed read and preserved metadata
+after a successful partial read. Existing control-frame, polling, worker
+teardown, queue limits, 50 reconnects, TLS allocator and OTA tests remain active.
+
+Numeric transport diagnostics are kept in RAM under a short critical section.
+They survive client destruction; later failed handshakes do not overwrite a
+recorded established-session failure. Tests exercise 10,000 concurrent reads
+and writes. `gatewayInfo.lastDisconnectDiag` accompanies AUTH_GATEWAY and
+GATEWAY_HEARTBEAT; the Relay companion change validates fields, deduplicates by
+room/node/boot/sequence and journals a device report when received. This is the
+last recorded transport failure, not necessarily every intentional disconnect.
+RAM and deduplication caches do not survive device and Relay restart respectively.
+
+Heltec V3 excludes the web server (`MESHTASTIC_EXCLUDE_WEBSERVER=1`), so this
+change does not enable `/json/report`. Wi-Fi power saving was already disabled;
+TCP keep-alive settings are unchanged. No USB flash, live Relay restart or
+deployment is part of this regression run. Host fault injection establishes
+code behavior, not the cause of the unrecorded October 31 hardware disconnects.
+
 2026-10-24: `websocket_receive_test.cpp` now executes the actual receive helper.
 The original helper failed the bounded test on a stalled partial frame. The
 helper now rejects zero progress inside a frame, checks stop between reads and

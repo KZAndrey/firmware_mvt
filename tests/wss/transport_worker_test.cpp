@@ -4,7 +4,7 @@
 #include "platform/esp32/MvtWssTransport.h"
 std::atomic<FakeClient*> sdk{nullptr};
 std::atomic<bool> writeEntered{false},allowWrite{false},stopEntered{false},allowStop{false};
-std::atomic<int> writeResult{0},created{0},destroyed{0},callbacks{0};
+std::atomic<int> writeResult{0},created{0},destroyed{0},callbacks{0},writeAttempts{0};
 std::mutex sentMutex;std::vector<std::string> sent;
 FakeClient *esp_websocket_client_init(const esp_websocket_client_config_t *cfg){assert(cfg->pingpong_timeout_sec==75);++created;return new FakeClient;}
 int esp_websocket_register_events(FakeClient *c,int,void(*fn)(void*,void*,int32_t,void*),void *arg){c->event=fn;c->arg=arg;return 0;}
@@ -12,7 +12,7 @@ int esp_websocket_client_start(FakeClient *c){sdk=c;return 0;}
 int esp_websocket_client_stop(FakeClient *c){stopEntered=true;while(!allowStop)vTaskDelay(1);c->event(c->arg,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);return 0;}
 int esp_websocket_client_destroy(FakeClient *c){sdk=nullptr;delete c;++destroyed;return 0;}
 bool esp_websocket_client_is_connected(FakeClient*){return writeResult<0;}
-int esp_websocket_client_send_text(FakeClient*,const char *data,int n,int){writeEntered=true;while(!allowWrite)vTaskDelay(1);if(writeResult==1){std::lock_guard<std::mutex> lock(sentMutex);sent.emplace_back(data,n);return n;}return writeResult;}
+int esp_websocket_client_send_text(FakeClient*,const char *data,int n,int timeout){assert(timeout==5000);++writeAttempts;writeEntered=true;while(!allowWrite)vTaskDelay(1);if(writeResult==1){std::lock_guard<std::mutex> lock(sentMutex);sent.emplace_back(data,n);return n;}return writeResult;}
 void until(std::function<bool()> f){auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);while(!f()){assert(std::chrono::steady_clock::now()<deadline);vTaskDelay(1);}}
 void connect(MvtWssTransport &t,unsigned epoch){assert(t.start("wss://test/ws","test-ca",epoch));until([]{return sdk.load()!=nullptr;});auto *c=sdk.load();c->event(c->arg,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);until([&]{return t.connected();});}
 void stop(MvtWssTransport &t){t.stop();until([&]{return !t.active();});}
@@ -35,6 +35,16 @@ int main(){
  until([]{std::lock_guard<std::mutex> lock(sentMutex);return sent.size()==3;});
  {std::lock_guard<std::mutex> lock(sentMutex);assert((sent==std::vector<std::string>{"data1","keepalive","data2"}));}
  stop(t);
+ // Safe failures before writing retain the in-flight item; no duplicate,
+ // reconnect, or callback while the reader owns the SDK lock.
+ writeResult=-1;const int attempts=writeAttempts, cb=callbacks, clients=created;
+ size_t deliveredBefore;{std::lock_guard<std::mutex> lock(sentMutex);deliveredBefore=sent.size();}
+ connect(t,10);assert(t.send("held-by-reader",false,true));
+ until([&]{return writeAttempts>=attempts+3;});
+ assert(callbacks==cb+1&&created==clients+1&&t.connected());
+ writeResult=1;until([&]{std::lock_guard<std::mutex> lock(sentMutex);return sent.size()==deliveredBefore+1;});
+ {std::lock_guard<std::mutex> lock(sentMutex);assert(sent.back()=="held-by-reader");}
+ stop(t);assert(!t.takeFailed(failed,epoch));
  for(unsigned revision=10;revision<60;++revision){
   connect(t,revision);
   auto before=sent.size();assert(t.send("cycle",false,true));

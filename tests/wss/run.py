@@ -16,6 +16,12 @@ zig = str(Path(args.zig).resolve())
 build = root / '.tools' / 'wss-tests'
 build.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ, ZIG_LOCAL_CACHE_DIR=str(build / 'cache'), ZIG_GLOBAL_CACHE_DIR=str(build / 'global-cache'))
+send_test = build / 'websocket_send_test.exe'
+subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/websocket_send_test.cpp', '-o', str(send_test)], env=env, check=True)
+subprocess.run([str(send_test)], check=True)
+diag_test = build / 'websocket_diagnostics_test.exe'
+subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/websocket_diagnostics_test.cpp', '-o', str(diag_test)], env=env, check=True)
+subprocess.run([str(diag_test)], check=True)
 worker_test = build / 'transport_worker_test.exe'
 subprocess.run([zig, 'c++', '-std=c++14', '-O0', '-DHAS_MVT_WSS_GATEWAY=1', '-Itests/wss/worker-stubs', '-Isrc', 'tests/wss/transport_worker_test.cpp', 'src/platform/esp32/MvtWssTransport.cpp', '-o', str(worker_test)], env=env, check=True)
 subprocess.run([str(worker_test)], check=True)
