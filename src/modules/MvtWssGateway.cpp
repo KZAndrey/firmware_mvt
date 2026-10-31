@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <new>
+#include <utility>
 
 MvtWssGateway *mvtWssGateway = nullptr;
 namespace {
@@ -150,7 +152,7 @@ const uint32_t ACK_TIMEOUT = 120000;
 MvtWssGateway::MvtWssGateway() : MeshModule("mvt_wss"), concurrency::OSThread("mvt_wss", 100) {
     mvtWssGateway = this;
     isPromiscuous = true; encryptedOk = false; loopbackOk = true;
-    incoming = xQueueCreate(8, sizeof(char *));
+    incoming = xQueueCreate(8, sizeof(std::string *));
     mvtOtaUpdater.begin();
 }
 MvtWssGateway::~MvtWssGateway() {
@@ -211,10 +213,12 @@ void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
     if (d.data_len && memchr(d.data_ptr, 0, d.data_len)) { inputFault = true; return; }
     if (d.data_len) frame.append(d.data_ptr, d.data_len);
     if (frame.size() == frameExpected) {
-        char *copy = static_cast<char *>(malloc(frame.size() + 1));
-        if (copy) {
-            memcpy(copy, frame.data(), frame.size()); copy[frame.size()] = 0;
-            if (!incoming || xQueueSend(incoming, &copy, 0) != pdTRUE) { free(copy); inputFault = true; }
+        // Transfer the completed buffer instead of allocating a second full
+        // frame. During OTA that spare ~2.9 KiB competes with cJSON's base64
+        // string allocation on the ESP32's fragmented internal heap.
+        auto *message = new (std::nothrow) std::string(std::move(frame));
+        if (message) {
+            if (!incoming || xQueueSend(incoming, &message, 0) != pdTRUE) { delete message; inputFault = true; }
         } else inputFault = true;
         frame.clear(); frameExpected = 0;
     }
@@ -234,8 +238,8 @@ void MvtWssGateway::finishDisconnect() {
     std::string().swap(frame); frameExpected = 0; inputFault = false;
     socketConnected = false; authenticated = false; authSent = false;
     connectionEnded = false; peerRejected = false;
-    char *p;
-    while (incoming && xQueueReceive(incoming, &p, 0) == pdTRUE) free(p);
+    std::string *p;
+    while (incoming && xQueueReceive(incoming, &p, 0) == pdTRUE) delete p;
     retiring = false;
     if (retirementNeedsDelay) lastConnectAttemptMs = millis();
     retirementNeedsDelay = false;
@@ -1079,9 +1083,12 @@ int32_t MvtWssGateway::runOnce() {
     // A server ERROR can arrive immediately before a close event. Process it
     // before reconnect logic, so replacement/admin rejection cannot loop.
     advanceAirPolls();advancePolls();advanceSingles();
-    char *text = nullptr;
+    std::string *text = nullptr;
     for (int i = 0; i < 8 && incoming && xQueueReceive(incoming, &text, 0) == pdTRUE; ++i) {
-        handleIncomingCommand(text); free(text);
+        // The consumer owns this string even if a command retires the socket
+        // and drains the rest of the queue.
+        std::unique_ptr<std::string> message(text);
+        handleIncomingCommand(message->c_str());
         if (retiring) break;
     }
     if (retiring) return 100;

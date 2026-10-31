@@ -54,10 +54,11 @@ using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
 Json parse(const std::string &s) { return Json(cJSON_Parse(s.c_str()), cJSON_Delete); }
 const char *sget(cJSON *j, const char *key) { auto *v = cJSON_GetObjectItemCaseSensitive(j, key); return cJSON_IsString(v) ? v->valuestring : ""; }
 double nget(cJSON *j, const char *key) { auto *v = cJSON_GetObjectItemCaseSensitive(j, key); return cJSON_IsNumber(v) ? v->valuedouble : 0; }
-void frame(MvtWssGateway &g, const std::string &s, size_t chunk = 2048) {
+void frame(MvtWssGateway &g, const std::string &s, size_t chunk = 2048, const char **firstBuffer = nullptr) {
     for (size_t off = 0; off < s.size(); off += chunk) {
         esp_websocket_event_data_t d = {s.data() + off, int(std::min(chunk, s.size() - off)), 1, nullptr, nullptr, int(s.size()), int(off)};
         g.receiveFrame(d);
+        if (!off && firstBuffer) *firstBuffer = g.frame.data();
     }
 }
 void healthyTick(MvtWssGateway &g);
@@ -365,7 +366,16 @@ int main(int argc, char **argv) {
     command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\",\"wssHopLimit\":3}"); CHECK(g.effectiveHopLimit() == 6);
     hopPacket = g.packet(0xaabbccdd); CHECK(hopPacket->hop_limit == 6); packetPool.release(hopPacket);
     std::string padded = "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":99,\"text\":\"chunked\",\"padding\":\"" + std::string(5000, 'a') + "\"}";
-    count = radio.sent.size(); frame(g, padded, 111); CHECK(radio.sent.size() == count); healthyTick(g); CHECK(radio.sent.size() == count + 1);
+    const char *receivedBuffer = nullptr;
+    count = radio.sent.size(); frame(g, padded, 111, &receivedBuffer); CHECK(radio.sent.size() == count);
+    // Completed frames must transfer their buffer to the queue, not retain a
+    // second payload-sized allocation while the consumer allocates JSON.
+    CHECK(g.frame.capacity() < padded.size());
+    CHECK(g.incoming->values.size() == 1);
+    auto *queuedFrame = static_cast<std::string *>(g.incoming->values.front());
+    CHECK(queuedFrame->data() == receivedBuffer);
+    CHECK(*queuedFrame == padded);
+    healthyTick(g); CHECK(radio.sent.size() == count + 1);
     esp_websocket_event_data_t d = {"ping", 4, 9, nullptr, nullptr, 4, 0}; g.receiveFrame(d); CHECK(!g.inputFault);
     d = {"bad", 3, 1, nullptr, nullptr, 3, 1}; g.receiveFrame(d); CHECK(g.inputFault);
     g.inputFault = false;
