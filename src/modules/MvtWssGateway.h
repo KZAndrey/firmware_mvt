@@ -8,6 +8,7 @@
 #include <cJSON.h>
 #include <deque>
 #include <map>
+#include <set>
 #include <string>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -49,6 +50,7 @@ private:
         std::string nodeKey;
         std::map<std::string,double> values;
     };
+    std::set<uint32_t> pkiConflicts;
     std::deque<AirPoll> airPolls;
     uint32_t diagnosticStep(uint32_t) const;
     uint32_t diagnosticReply(uint32_t) const;
@@ -102,7 +104,7 @@ private:
     void publishNode(cJSON *);
     void publishWaypoint(cJSON *);
     void handleIncomingCommand(const char *);
-    void status(uint32_t, const char *);
+    void status(uint32_t, const char *, const char *encryption = nullptr, const char *errorCode = nullptr);
     void finishDiagnostic(const Pending &, bool, const meshtastic_MeshPacket * = nullptr,
                           const meshtastic_Telemetry * = nullptr);
     meshtastic_MeshPacket *packet(uint32_t, uint32_t = 0);

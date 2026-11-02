@@ -102,6 +102,8 @@ int main(int argc, char **argv) {
     strcpy(moduleConfig.mqtt.username, "ROOM1"); strcpy(moduleConfig.mqtt.password, "relay-secret");
     strcpy(owner.short_name, "MVT"); strcpy(owner.long_name, "Movetain Host");
     meshtastic_NodeInfoLite peer = {}; peer.num = 0xaabbccdd; peer.channel = 2;
+    config.security.private_key.size = 32; memset(config.security.private_key.bytes, 7, 32);
+    peer.user.public_key.size = 32; memset(peer.user.public_key.bytes, 8, 32);
     peer.last_heard = 1700000000; peer.has_user = true; strcpy(peer.user.short_name, "A"); db.nodes.push_back(peer);
     MvtWssGateway g;
     testOtaWorkerRunning=true;healthyTick(g);CHECK(g.transport.client==nullptr);
@@ -157,6 +159,7 @@ int main(int argc, char **argv) {
     CHECK(sent.decoded.portnum == meshtastic_PortNum_PRIVATE_APP);
     mvt::Payload payload; CHECK(mvt::decode(sent.decoded.payload.bytes, sent.decoded.payload.size, payload));
     CHECK(payload.comment == u8"Привет \"А\"\nстрока" && payload.flags == 6);
+    CHECK(radio.sent.back().pki_encrypted); CHECK(radio.sent.back().public_key.size == 32);
     command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":42,\"text\":\"duplicate\"}"); CHECK(radio.sent.size() == 1);
     ack(g, 9, 42); ack(g, db.getNodeNum(), 42); ack(g, 0xaabbccdd, 42, 0, 5); ack(g, 0xaabbccdd, 43);
     CHECK(g.pending.size() == 1);
@@ -688,6 +691,20 @@ int main(int argc, char **argv) {
         std::string message=std::string("{\"type\":\"ERROR\",\"code\":\"")+code+"\"}";
         blocked.handleIncomingCommand(message.c_str());auto created=testWsCreated;
         testMillis+=3600000;blocked.runOnce();CHECK(blocked.authBlocked&&testWsCreated==created);
+    }
+    {
+        MvtWssGateway secure; healthyTick(secure); secure.socketConnected = true; healthyTick(secure);
+        secure.authenticated = true;
+        command(secure, "{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1791892800000}");
+        const auto before = radio.sent.size();
+        command(secure, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":9101,\"recipientId\":1431655765,\"text\":\"must not downgrade\"}");
+        for (size_t i=before;i<radio.sent.size();++i) CHECK(radio.sent[i].decoded.portnum != meshtastic_PortNum_PRIVATE_APP);
+        auto failure = lastEvent(secure, "CHAT_STATUS_UPDATE");
+        CHECK(std::string(sget(failure.get(), "errorCode")) == "PKI_KEY_UNAVAILABLE");
+        secure.pkiConflicts.insert(0xaabbccdd);
+        command(secure, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":9102,\"recipientId\":2864434397,\"text\":\"changed key\"}");
+        failure = lastEvent(secure, "CHAT_STATUS_UPDATE");
+        CHECK(std::string(sget(failure.get(), "errorCode")) == "PKI_KEY_CHANGED");
     }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {

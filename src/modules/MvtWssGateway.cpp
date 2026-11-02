@@ -289,6 +289,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setString(p, "longName", owner.long_name);
     setString(p, "shortName", owner.short_name);
     setString(p, "gatewayType", "WSS");
+    cJSON_AddBoolToObject(p, "pkiPrivateChat", true);
     if (auto *diag = mvtWssDiagnosticJson()) cJSON_AddItemToObject(p, "lastDisconnectDiag", diag);
     auto *radio = RadioLibInterface::instance;
     if (radio && radio->getFreq() > 0) {
@@ -339,6 +340,9 @@ cJSON *MvtWssGateway::nodeDocument(uint32_t id, bool mv) {
     auto *n = nodeDB->getMeshNode(id);
     if (n && !mv) {
         if (n->has_user && n->user.short_name[0]) setString(p, "callsign", n->user.short_name);
+        setString(p, "pkiSource", "WSS");
+        setNumber(p, "pkiGatewayId", nodeDB->getNodeNum());
+        setString(p, "pkiState", pkiConflicts.count(id) ? "CHANGED" : n->has_user && n->user.public_key.size == 32 ? "KNOWN" : "UNKNOWN");
         if (n->has_user && n->user.long_name[0]) setString(p, "longName", n->user.long_name);
         if (n->has_user && n->user.short_name[0]) setString(p, "shortName", n->user.short_name);
         if (n->has_position && (n->position.latitude_i || n->position.longitude_i)) {
@@ -418,10 +422,13 @@ void MvtWssGateway::sendSnapshot() {
     }
     snapshotPending = !snapshot.empty();
 }
-void MvtWssGateway::status(uint32_t id, const char *value) {
+void MvtWssGateway::status(uint32_t id, const char *value, const char *encryption, const char *errorCode) {
     if (!id) return;
     auto p = event("CHAT_STATUS_UPDATE"); cJSON_AddNumberToObject(p, "id", id);
-    cJSON_AddStringToObject(p, "status", value); publish(p);
+    cJSON_AddStringToObject(p, "status", value);
+    if (encryption) setString(p, "encryption", encryption);
+    if (errorCode) setString(p, "errorCode", errorCode);
+    publish(p);
 }
 meshtastic_MeshPacket *MvtWssGateway::packet(uint32_t target, uint32_t id) {
     if (!router || !target || target == 1 || !config.lora.tx_enabled) return nullptr;
@@ -494,6 +501,14 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     if (!wantPacket(&mp) || mp.decoded.payload.size > sizeof(mp.decoded.payload.bytes)) return ProcessMessage::CONTINUE;
     uint32_t from = mp.from ? mp.from : nodeDB->getNodeNum();
     bool local = from == nodeDB->getNodeNum();
+    if (!local && mp.decoded.portnum == meshtastic_PortNum_NODEINFO_APP) {
+        meshtastic_User user = meshtastic_User_init_default;
+        auto *known = nodeDB->getMeshNode(from);
+        if (decodeProto(mp, &meshtastic_User_msg, &user) && user.public_key.size == 32 && known && known->user.public_key.size == 32 &&
+            memcmp(user.public_key.bytes, known->user.public_key.bytes, 32) != 0) {
+            if (pkiConflicts.size() < MAX_NODES) pkiConflicts.insert(from);
+        }
+    }
     uint32_t request = mp.decoded.request_id;
     meshtastic_Telemetry telemetry = meshtastic_Telemetry_init_default;
     bool hasTelemetry = mp.decoded.portnum == meshtastic_PortNum_TELEMETRY_APP &&
@@ -806,6 +821,26 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if (active >= MAX_PENDING && chat && target != NODENUM_BROADCAST) { status(id, "FAILED"); return; }
         auto *p = packet(target, id);
         if (!p) { if (chat) status(id, "FAILED"); return; }
+        if (chat && target != NODENUM_BROADCAST) {
+            if (pkiConflicts.count(target)) { packetPool.release(p); status(id, "FAILED", "PKI_FAILED", "PKI_KEY_CHANGED"); return; }
+            auto *peer = nodeDB->getMeshNode(target);
+            if (!peer || peer->user.public_key.size != 32 || config.security.private_key.size != 32) {
+                packetPool.release(p);
+                status(id, "FAILED", "PKI_FAILED", "PKI_KEY_UNAVAILABLE");
+                // Discovery carries our public identity; never send an empty User.
+                auto *query = packet(target, 0);
+                if (query) {
+                    query->decoded.portnum = meshtastic_PortNum_NODEINFO_APP;
+                    query->decoded.want_response = true;
+                    query->decoded.payload.size = pb_encode_to_bytes(query->decoded.payload.bytes, sizeof(query->decoded.payload.bytes), &meshtastic_User_msg, &owner);
+                    transmit(query);
+                }
+                return;
+            }
+            p->pki_encrypted = true;
+            p->public_key.size = 32;
+            memcpy(p->public_key.bytes, peer->user.public_key.bytes, 32);
+        }
         const cJSON *wp = get(j.get(), "waypoint");
         mvt::Payload payload;
         payload.name = chat ? str(j.get(), "senderCallsign", "HQ") : str(wp, "title", "HQ Waypoint");
@@ -831,7 +866,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
             if (chat) status(id, "FAILED");
             return;
         }
-        if (chat) status(packetId, target == NODENUM_BROADCAST ? "SENT" : "AWAITING_ACK");
+        if (chat) status(packetId, target == NODENUM_BROADCAST ? "SENT" : "AWAITING_ACK", target == NODENUM_BROADCAST ? nullptr : "PKI_REQUIRED");
         if (id) { if (completedCommands.size() >= 64) completedCommands.pop_front(); completedCommands.push_back(id); }
         return;
     }
