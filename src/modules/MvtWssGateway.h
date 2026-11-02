@@ -1,6 +1,7 @@
 #pragma once
 #if HAS_MVT_WSS_GATEWAY
 #include "MeshModule.h"
+#include "mesh/generated/meshtastic/admin.pb.h"
 #include "concurrency/OSThread.h"
 #include "platform/esp32/MvtWssTransport.h"
 #include <atomic>
@@ -18,6 +19,7 @@ class MvtWssGateway : public MeshModule, private concurrency::OSThread {
 public:
     MvtWssGateway();
     ~MvtWssGateway() override;
+    void acceptVerifiedContact(const meshtastic_SharedContact &contact);
     ProcessMessage handleReceived(const meshtastic_MeshPacket &) override;
     bool wantPacket(const meshtastic_MeshPacket *) override;
     static void handleWsEvent(void *, esp_event_base_t, int32_t, void *);

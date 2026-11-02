@@ -1,6 +1,7 @@
 #pragma once
 #include "configuration.h"
 #define SEGMENT_CONFIG 1
+#define NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_MASK 1
 struct NodeDB {
     unsigned configSaves = 0;
     bool saveSucceeds = true;

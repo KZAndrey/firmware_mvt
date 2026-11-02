@@ -707,6 +707,23 @@ int main(int argc, char **argv) {
         command(secure, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":9102,\"recipientId\":2864434397,\"text\":\"changed key\"}");
         failure = lastEvent(secure, "CHAT_STATUS_UPDATE");
         CHECK(std::string(sget(failure.get(), "errorCode")) == "PKI_KEY_CHANGED");
+        meshtastic_SharedContact contact = meshtastic_SharedContact_init_default;
+        contact.node_num=0xaabbccdd; contact.has_user=true;
+        contact.user.public_key.size=32; memset(contact.user.public_key.bytes,8,32);
+        auto *stored=db.getMeshNode(contact.node_num);
+        secure.acceptVerifiedContact(contact); CHECK(secure.pkiConflicts.count(contact.node_num));
+        contact.manually_verified=true;
+        secure.acceptVerifiedContact(contact); CHECK(secure.pkiConflicts.count(contact.node_num));
+        stored->bitfield |= NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_MASK;
+        contact.user.public_key.bytes[0]=9;
+        secure.acceptVerifiedContact(contact); CHECK(secure.pkiConflicts.count(contact.node_num));
+        contact.user.public_key.bytes[0]=8; contact.should_ignore=true;
+        secure.acceptVerifiedContact(contact); CHECK(secure.pkiConflicts.count(contact.node_num));
+        contact.should_ignore=false;
+        secure.acceptVerifiedContact(contact); CHECK(!secure.pkiConflicts.count(contact.node_num));
+        command(secure,"{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":9103,\"recipientId\":2864434397,\"text\":\"verified contact\"}");
+        CHECK(radio.sent.back().id==9103 && radio.sent.back().pki_encrypted);
+
     }
     for (const char *title : {"My Location", "Target Point", "Fast Location", "SOS Emergency", "Waypoint"}) {
         MvtWssGateway secure; healthyTick(secure); secure.socketConnected = true; healthyTick(secure); secure.authenticated = true;

@@ -498,6 +498,18 @@ void MvtWssGateway::finishDiagnostic(const Pending &p, bool success, const mesht
     }
     publish(e);
 }
+void MvtWssGateway::acceptVerifiedContact(const meshtastic_SharedContact &contact) {
+    // Only an explicit, successfully stored manual verification resolves a conflict.
+    // Matching NodeInfo from the air must never clear the sticky warning.
+    auto *saved = nodeDB->getMeshNode(contact.node_num);
+    if (!contact.manually_verified || !contact.has_user || contact.should_ignore ||
+        contact.user.public_key.size != 32 || !saved || !saved->has_user ||
+        !(saved->bitfield & NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_MASK) ||
+        saved->user.public_key.size != 32 ||
+        memcmp(saved->user.public_key.bytes, contact.user.public_key.bytes, 32) != 0) return;
+    if (pkiConflicts.erase(contact.node_num)) publishNode(nodeDocument(contact.node_num, false));
+}
+
 ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     if (!wantPacket(&mp) || mp.decoded.payload.size > sizeof(mp.decoded.payload.bytes)) return ProcessMessage::CONTINUE;
     uint32_t from = mp.from ? mp.from : nodeDB->getNodeNum();

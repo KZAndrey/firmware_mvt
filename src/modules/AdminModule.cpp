@@ -17,6 +17,9 @@
 #endif
 #include "Router.h"
 #include "configuration.h"
+#if HAS_MVT_WSS_GATEWAY
+#include "MvtWssGateway.h"
+#endif
 #include "main.h"
 #ifdef ARCH_NRF52
 #include "main.h"
@@ -337,6 +340,9 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
     case meshtastic_AdminMessage_add_contact_tag: {
         LOG_INFO("Client received add_contact command");
         nodeDB->addFromContact(r->add_contact);
+#if HAS_MVT_WSS_GATEWAY
+        if (mvtWssGateway) mvtWssGateway->acceptVerifiedContact(r->add_contact);
+#endif
         break;
     }
     case meshtastic_AdminMessage_set_favorite_node_tag: {
