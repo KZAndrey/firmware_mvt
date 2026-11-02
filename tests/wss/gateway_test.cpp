@@ -185,6 +185,8 @@ int main(int argc, char **argv) {
     command(g, "{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"recipientId\":2864434397,\"waypoint\":{\"title\":\"Target\",\"comment\":\"точка\",\"latitude\":43.2,\"longitude\":76.8,\"altitude\":1234,\"isTarget\":true}}");
     CHECK(radio.sent.back().to == 0xaabbccdd); CHECK(mvt::decode(radio.sent.back().decoded.payload.bytes, radio.sent.back().decoded.payload.size, payload));
     CHECK(payload.icon == 5 && payload.altitude == 1234 && payload.name == "Target");
+    CHECK(radio.sent.back().pki_encrypted && radio.sent.back().public_key.size == 32);
+    g.pending.clear();
     // Known node: position and telemetry, independently correlated and paced.
     command(g, "{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();
     CHECK(sent.decoded.want_response && sent.decoded.portnum == meshtastic_PortNum_POSITION_APP);
@@ -705,6 +707,22 @@ int main(int argc, char **argv) {
         command(secure, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":9102,\"recipientId\":2864434397,\"text\":\"changed key\"}");
         failure = lastEvent(secure, "CHAT_STATUS_UPDATE");
         CHECK(std::string(sget(failure.get(), "errorCode")) == "PKI_KEY_CHANGED");
+    }
+    for (const char *title : {"My Location", "Target Point", "Fast Location", "SOS Emergency", "Waypoint"}) {
+        MvtWssGateway secure; healthyTick(secure); secure.socketConnected = true; healthyTick(secure); secure.authenticated = true;
+        std::string wp = std::string(",\"waypoint\":{\"title\":\"")+title+"\",\"latitude\":49.94,\"longitude\":82.57}}";
+        auto before = radio.sent.size();
+        command(secure,(std::string("{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"id\":9201,\"recipientId\":1431655765")+wp).c_str());
+        for(size_t i=before;i<radio.sent.size();++i)CHECK(radio.sent[i].decoded.portnum!=meshtastic_PortNum_PRIVATE_APP);
+        CHECK(std::string(sget(lastEvent(secure,"CHAT_STATUS_UPDATE").get(),"errorCode"))=="PKI_KEY_UNAVAILABLE");
+        command(secure,(std::string("{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"id\":9202,\"recipientId\":2864434397")+wp).c_str());
+        CHECK(radio.sent.back().decoded.portnum==meshtastic_PortNum_PRIVATE_APP && radio.sent.back().pki_encrypted);
+        CHECK(std::string(sget(lastEvent(secure,"CHAT_STATUS_UPDATE").get(),"encryption"))=="PKI_REQUIRED");
+        secure.pkiConflicts.insert(0xaabbccdd);before=radio.sent.size();
+        command(secure,(std::string("{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"id\":9203,\"recipientId\":2864434397")+wp).c_str());
+        CHECK(radio.sent.size()==before);
+        command(secure,(std::string("{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"id\":9204,\"recipientId\":4294967295")+wp).c_str());
+        CHECK(radio.sent.back().to==NODENUM_BROADCAST && !radio.sent.back().pki_encrypted);
     }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {

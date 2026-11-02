@@ -290,6 +290,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setString(p, "shortName", owner.short_name);
     setString(p, "gatewayType", "WSS");
     cJSON_AddBoolToObject(p, "pkiPrivateChat", true);
+    cJSON_AddBoolToObject(p, "pkiPrivateWaypoints", true);
     if (auto *diag = mvtWssDiagnosticJson()) cJSON_AddItemToObject(p, "lastDisconnectDiag", diag);
     auto *radio = RadioLibInterface::instance;
     if (radio && radio->getFreq() > 0) {
@@ -654,6 +655,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
             auto msg = cJSON_CreateObject();
             cJSON_AddNumberToObject(msg, "id", mp.id); cJSON_AddNumberToObject(msg, "senderId", from);
             cJSON_AddNumberToObject(msg, "recipientId", mp.to);
+            if (mp.to != NODENUM_BROADCAST) cJSON_AddStringToObject(msg, "encryption", mp.pki_encrypted ? "PKI" : "CHANNEL");
             cJSON_AddStringToObject(msg, "senderCallsign", mv.name.c_str());
             cJSON_AddStringToObject(msg, "text", mv.comment.c_str());
             cJSON_AddNumberToObject(msg, "timestampMs", double(nowMs()));
@@ -678,7 +680,8 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
         auto msg = cJSON_CreateObject();
         std::string text(reinterpret_cast<const char *>(mp.decoded.payload.bytes), mp.decoded.payload.size);
         cJSON_AddNumberToObject(msg, "id", mp.id); cJSON_AddNumberToObject(msg, "senderId", from);
-        cJSON_AddNumberToObject(msg, "recipientId", mp.to); cJSON_AddStringToObject(msg, "senderCallsign", str(n.get(), "callsign"));
+        cJSON_AddNumberToObject(msg, "recipientId", mp.to);
+            if (mp.to != NODENUM_BROADCAST) cJSON_AddStringToObject(msg, "encryption", mp.pki_encrypted ? "PKI" : "CHANNEL"); cJSON_AddStringToObject(msg, "senderCallsign", str(n.get(), "callsign"));
         cJSON_AddStringToObject(msg, "text", text.c_str()); cJSON_AddNumberToObject(msg, "timestampMs", double(nowMs()));
         cJSON_AddBoolToObject(msg, "isSos", false); cJSON_AddStringToObject(msg, "status", "RECEIVED");
         cJSON_AddNumberToObject(msg, "hops", hops);
@@ -818,10 +821,10 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if (id && (std::find(completedCommands.begin(), completedCommands.end(), id) != completedCommands.end() ||
             std::any_of(pending.begin(), pending.end(), [id](const Pending &p) { return p.id == id; }))) return;
         const size_t active = std::count_if(pending.begin(), pending.end(), [](const Pending &p) { return p.kind != "latechat"; });
-        if (active >= MAX_PENDING && chat && target != NODENUM_BROADCAST) { status(id, "FAILED"); return; }
+        if (active >= MAX_PENDING && target != NODENUM_BROADCAST) { status(id, "FAILED"); return; }
         auto *p = packet(target, id);
-        if (!p) { if (chat) status(id, "FAILED"); return; }
-        if (chat && target != NODENUM_BROADCAST) {
+        if (!p) { status(id, "FAILED"); return; }
+        if (target != NODENUM_BROADCAST) {
             if (pkiConflicts.count(target)) { packetPool.release(p); status(id, "FAILED", "PKI_FAILED", "PKI_KEY_CHANGED"); return; }
             auto *peer = nodeDB->getMeshNode(target);
             if (!peer || peer->user.public_key.size != 32 || config.security.private_key.size != 32) {
@@ -846,7 +849,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         payload.name = chat ? str(j.get(), "senderCallsign", "HQ") : str(wp, "title", "HQ Waypoint");
         payload.comment = chat ? str(j.get(), "text") : str(wp, "comment");
         payload.flags = chat ? 2 : 1;
-        if (jsonBool(j.get(), "isSos")) payload.flags |= 4;
+        if (jsonBool(j.get(), "isSos") || (waypoint && jsonBool(wp, "isSos"))) payload.flags |= 4;
         if (waypoint) {
             payload.lat = number(wp, "latitude", NAN); payload.lon = number(wp, "longitude", NAN);
             payload.icon = jsonBool(wp, "isTarget") ? 5 : 3;
@@ -856,17 +859,17 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         p->decoded.portnum = meshtastic_PortNum_PRIVATE_APP;
         p->decoded.payload.size = mvt::encode(payload, p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes));
         if (!p->decoded.payload.size || (chat && payload.comment.empty())) {
-            packetPool.release(p); if (chat) status(id, "FAILED"); return;
+            packetPool.release(p); status(id, "FAILED"); return;
         }
         uint32_t packetId = p->id;
-        if (chat && target != NODENUM_BROADCAST)
+        if (target != NODENUM_BROADCAST)
             pending.push_back({packetId, target, millis(), "chat", key(target), false});
         if (!transmit(p)) {
             pending.erase(std::remove_if(pending.begin(), pending.end(), [packetId](const Pending &x) { return x.id == packetId; }), pending.end());
-            if (chat) status(id, "FAILED");
+            status(id, "FAILED");
             return;
         }
-        if (chat) status(packetId, target == NODENUM_BROADCAST ? "SENT" : "AWAITING_ACK", target == NODENUM_BROADCAST ? nullptr : "PKI_REQUIRED");
+        status(packetId, target == NODENUM_BROADCAST ? "SENT" : "AWAITING_ACK", target == NODENUM_BROADCAST ? nullptr : "PKI_REQUIRED");
         if (id) { if (completedCommands.size() >= 64) completedCommands.pop_front(); completedCommands.push_back(id); }
         return;
     }
