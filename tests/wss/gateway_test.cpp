@@ -1,4 +1,5 @@
 #include <pb_decode.h>
+#include <mbedtls/base64.h>
 // Compile the production gateway with deterministic radio/socket adapters.
 #include "configuration.h"
 #include <memory>
@@ -723,6 +724,31 @@ int main(int argc, char **argv) {
         secure.acceptVerifiedContact(contact); CHECK(!secure.pkiConflicts.count(contact.node_num));
         command(secure,"{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":9103,\"recipientId\":2864434397,\"text\":\"verified contact\"}");
         CHECK(radio.sent.back().id==9103 && radio.sent.back().pki_encrypted);
+
+        command(secure,"{\"type\":\"CMD_RADIO_KEY\",\"requestId\":\"read\",\"action\":\"read\",\"gatewayId\":287454020,\"nodeId\":2864434397}");
+        auto keyReply=lastEvent(secure,"RADIO_KEY_RESULT");
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(keyReply.get(),"ok")));
+        const std::string oldKey=sget(keyReply.get(),"publicKey");
+        uint8_t replacement[32];memset(replacement,9,32);
+        uint8_t encoded[45];size_t encodedSize=0;
+        CHECK(mbedtls_base64_encode(encoded,sizeof(encoded),&encodedSize,replacement,32)==0);
+        const std::string newKey(reinterpret_cast<char *>(encoded),encodedSize);
+        const std::string request="{\"type\":\"CMD_RADIO_KEY\",\"requestId\":\"verify\",\"action\":\"verify\",\"gatewayId\":287454020,\"nodeId\":2864434397,\"expectedKey\":\""+oldKey+"\",\"publicKey\":\""+newKey+"\",\"verified\":";
+        secure.pkiConflicts.insert(contact.node_num);
+        command(secure,(request+"false}").c_str());
+        CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(lastEvent(secure,"RADIO_KEY_RESULT").get(),"ok")));
+        CHECK(stored->user.public_key.bytes[0]==8 && secure.pkiConflicts.count(contact.node_num));
+        db.saveSucceeds=false;
+        command(secure,(request+"true}").c_str());
+        CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(lastEvent(secure,"RADIO_KEY_RESULT").get(),"ok")));
+        CHECK(secure.pkiConflicts.count(contact.node_num));db.saveSucceeds=true;
+        command(secure,(request+"true}").c_str());
+        keyReply=lastEvent(secure,"RADIO_KEY_RESULT");
+        CHECK(cJSON_IsTrue(cJSON_GetObjectItem(keyReply.get(),"ok")));
+        CHECK(std::string(sget(keyReply.get(),"publicKey"))==newKey && !secure.pkiConflicts.count(contact.node_num));
+        command(secure,(request+"true}").c_str()); // stale previous-key compare must fail
+        CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(lastEvent(secure,"RADIO_KEY_RESULT").get(),"ok")));
+        memcpy(stored->user.public_key.bytes,contact.user.public_key.bytes,32);
 
     }
     for (const char *title : {"My Location", "Target Point", "Fast Location", "SOS Emergency", "Waypoint"}) {

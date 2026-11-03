@@ -10,6 +10,8 @@
 #include "MvtRootCA.h"
 #include "MeshService.h"
 #include "NodeDB.h"
+#include "TypeConversions.h"
+#include <mbedtls/base64.h>
 #include "PowerStatus.h"
 #include "Router.h"
 #include "RadioLibInterface.h"
@@ -290,6 +292,7 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setString(p, "shortName", owner.short_name);
     setString(p, "gatewayType", "WSS");
     cJSON_AddBoolToObject(p, "pkiPrivateChat", true);
+    cJSON_AddBoolToObject(p, "recipientKeyRecovery", true);
     cJSON_AddBoolToObject(p, "pkiPrivateWaypoints", true);
     if (auto *diag = mvtWssDiagnosticJson()) cJSON_AddItemToObject(p, "lastDisconnectDiag", diag);
     auto *radio = RadioLibInterface::instance;
@@ -777,6 +780,57 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         return;
     }
     if (!authenticated || authBlocked) return;
+    if (type == "CMD_RADIO_KEY") {
+        auto reply = json(event("RADIO_KEY_RESULT"));
+        setString(reply.get(), "requestId", str(j.get(), "requestId"));
+        uint32_t recipient = 0, gateway = 0;
+        identifier(j.get(), "nodeId", recipient);
+        identifier(j.get(), "gatewayId", gateway);
+        setNumber(reply.get(), "nodeId", recipient);
+        setNumber(reply.get(), "gatewayId", nodeDB->getNodeNum());
+        auto fail = [&](const char *message) {
+            setBool(reply.get(), "ok", false); setString(reply.get(), "message", message); publish(reply.release());
+        };
+        if (gateway != nodeDB->getNodeNum() || !recipient || recipient == UINT32_MAX ||
+            (recipient == gateway && std::string(str(j.get(), "action")) != "read")) {
+            fail("Connected radio or recipient changed. Reopen verification."); return;
+        }
+        auto *saved = nodeDB->getMeshNode(recipient);
+        if (!saved || !saved->has_user || saved->user.public_key.size != 32) {
+            fail("Recipient key is missing. Refresh nearby nodes and retry."); return;
+        }
+        auto encodeKey = [](const uint8_t *bytes) {
+            unsigned char out[45] = {}; size_t length = 0;
+            if (mbedtls_base64_encode(out, sizeof(out), &length, bytes, 32) != 0) return std::string();
+            return std::string(reinterpret_cast<char *>(out), length);
+        };
+        const std::string action = str(j.get(), "action");
+        if (action == "verify") {
+            const std::string incoming = str(j.get(), "publicKey");
+            uint8_t bytes[32] = {}; size_t length = 0;
+            if (!jsonBool(j.get(), "verified") || encodeKey(saved->user.public_key.bytes) != str(j.get(), "expectedKey") ||
+                incoming.size() != 44 || mbedtls_base64_decode(bytes, sizeof(bytes), &length,
+                    reinterpret_cast<const unsigned char *>(incoming.data()), incoming.size()) != 0 ||
+                length != 32 || encodeKey(bytes) != incoming || std::all_of(bytes, bytes + 32, [](uint8_t b){ return b == 0; })) {
+                fail("Saved key changed or verification is invalid. Read the key again."); return;
+            }
+            meshtastic_SharedContact contact = meshtastic_SharedContact_init_default;
+            contact.node_num = recipient; contact.has_user = true; contact.manually_verified = true;
+            contact.user = TypeConversions::ConvertToUser(recipient, saved->user);
+            contact.user.public_key.size = 32; memcpy(contact.user.public_key.bytes, bytes, 32);
+            nodeDB->addFromContact(contact);
+            saved = nodeDB->getMeshNode(recipient);
+            if (!saved || saved->user.public_key.size != 32 || memcmp(saved->user.public_key.bytes, bytes, 32) != 0 ||
+                !(saved->bitfield & NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_MASK)) {
+                fail("Radio did not confirm the new key. Sending remains blocked."); return;
+            }
+            acceptVerifiedContact(contact);
+            publishNode(nodeDocument(recipient, false));
+        } else if (action != "read") { fail("Invalid key action."); return; }
+        setBool(reply.get(), "ok", true);
+        setString(reply.get(), "publicKey", encodeKey(saved->user.public_key.bytes).c_str());
+        publish(reply.release()); return;
+    }
     if(type=="CMD_FIRMWARE_CHUNK"){mvtOtaUpdater.chunk(j.get());return;}
     if(type=="CMD_FIRMWARE_UPDATE"){
         bool powered=powerStatus&&(powerStatus->getHasUSB()||powerStatus->getIsCharging()||
