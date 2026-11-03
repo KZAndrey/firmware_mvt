@@ -182,11 +182,10 @@ static void drawMvtFirmware(OLEDDisplay *display, OLEDDisplayUiState *, int16_t 
 {
     if(drawMvtOta(display,x,y))return;
     display->setColor(WHITE);
-    mvtScreen::row(display,x,y+1,"FIRMWARE V.");
-    const std::string version=xstr(APP_VERSION);
-    const size_t split=version.rfind('.');
-    mvtScreen::row(display,x,y+11,version.substr(0,split+1));
-    mvtScreen::row(display,x,y+21,version.substr(split+1));
+    mvtScreen::row(display,x,y+1,"FIRMWARE");
+    const auto lines=mvtScreen::firmwareLines(xstr(APP_VERSION));
+    mvtScreen::row(display,x,y+11,lines.first);
+    mvtScreen::row(display,x,y+21,lines.second);
 }
 static void drawMvtClock(OLEDDisplay *display, OLEDDisplayUiState *, int16_t x, int16_t y)
 {

@@ -27,6 +27,7 @@ bool mvt_wss_last_diagnostic(MvtWssDiagnostic *out) { *out = testDiagnostic; ret
 #undef private
 #include "modules/MvtPayload.h"
 #include "graphics/MvtCompactScreen.h"
+#include "modules/MvtOtaHealth.h"
 uint32_t testMillis = 20000;
 meshtastic_LocalConfig config = meshtastic_LocalConfig_init_default;
 meshtastic_LocalModuleConfig moduleConfig = meshtastic_LocalModuleConfig_init_default;
@@ -99,6 +100,13 @@ void healthyTick(MvtWssGateway &g) {
     g.runOnce();
 }
 int main(int argc, char **argv) {
+    CHECK(mvtOtaHealth::ready(true,true,true,1000,27260,16372));
+    CHECK(!mvtOtaHealth::ready(false,true,true,1000,27260,16372));
+    CHECK(!mvtOtaHealth::ready(true,false,true,1000,27260,16372));
+    CHECK(!mvtOtaHealth::ready(true,true,false,1000,27260,16372));
+    CHECK(!mvtOtaHealth::ready(true,true,true,30000,27260,16372));
+    CHECK(!mvtOtaHealth::ready(true,true,true,1000,16383,16372));
+    CHECK(!mvtOtaHealth::ready(true,true,true,1000,27260,4095));
     config.lora.tx_enabled = true; config.lora.hop_limit = 4; config.lora.use_preset=true; config.lora.modem_preset=meshtastic_Config_LoRaConfig_ModemPreset_LONG_FAST; moduleConfig.mqtt.enabled = true;
     strcpy(moduleConfig.mqtt.username, "ROOM1"); strcpy(moduleConfig.mqtt.password, "relay-secret");
     strcpy(owner.short_name, "MVT"); strcpy(owner.long_name, "Movetain Host");
@@ -399,6 +407,13 @@ int main(int argc, char **argv) {
     for (const char *status : {"BADKEY","NOROOM","TAKEN","BLOCK","BADURL","FAIL","FRAME","SETUP","SETKEY","WAIT","RETRY","AUTH","OK","OFF"})
         CHECK(mvtScreen::statusLine(status).size() <= 10);
     CHECK(mvtScreen::roomLine("ABC123", 0) == "R:ABC123");
+    for (const std::string version : {"2.7.15", "2.7.15.0211", "2.7.15.0211.3", "2.7.15.0211.4", "2.7.15.0211.1234"}) {
+        const auto lines = mvtScreen::firmwareLines(version);
+        CHECK(lines.first.size() <= 10 && lines.second.size() <= 10);
+        CHECK(lines.first + lines.second == version);
+    }
+    CHECK(mvtScreen::firmwareLines("2.7.15.0211.4").first == "2.7.15.");
+    CHECK(mvtScreen::firmwareLines("2.7.15.0211.4").second == "0211.4");
     const std::string longRoom = "ROOM_1234567890";
     std::string visible;
     for (unsigned i=0;i<longRoom.size()+3;++i) {

@@ -5,9 +5,17 @@
 #include <ctype.h>
 #include <cstring>
 #include <cmath>
+#include <utility>
 #include "assets/MovetainLogo.h"
 
 namespace mvtScreen {
+inline std::pair<std::string, std::string> firmwareLines(const std::string &version) {
+    if (version.size() <= 10) return {version, ""};
+    auto split = version.rfind('.', 9);
+    split = split == std::string::npos ? 10 : split + 1;
+    if (version.size() - split > 10) split = 10;
+    return {version.substr(0, split), version.substr(split)};
+}
 inline std::string statusLine(const char *status) {
     const char *code = status ? status : "OFF";
     if (!strcmp(code,"BADKEY")) return "BAD KEY";

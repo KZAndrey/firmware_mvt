@@ -188,11 +188,19 @@ void MvtOtaUpdater::tick(bool healthy){
         LOG_INFO("MVT OTA cleanup heap=%u largest=%u",ESP.getFreeHeap(),ESP.getMaxAllocHeap());
     }
     if(!trial)return;
+    if(!lastHealthLog || uint32_t(millis()-lastHealthLog)>=5000){
+        lastHealthLog=millis();
+        LOG_INFO("MVT OTA health ready=%d heap=%u largest=%u generation=%d room=%d node=%d stableMs=%u",
+            int(healthy),ESP.getFreeHeap(),ESP.getMaxAllocHeap(),int(generation==MVT_OTA_GENERATION),
+            int(roomId==moduleConfig.mqtt.username),int(nodeId==nodeDB->getNodeNum()),
+            healthySince?uint32_t(millis()-healthySince):0);
+    }
     if(generation!=MVT_OTA_GENERATION||roomId!=moduleConfig.mqtt.username||nodeId!=nodeDB->getNodeNum())healthy=false;
     if(!healthy){healthySince=0;return;}
     if(!healthySince)healthySince=millis();
     if(uint32_t(millis()-healthySince)<30000)return;
-    if(esp_ota_mark_app_valid_cancel_rollback()!=ESP_OK)return;
+    const auto approved=esp_ota_mark_app_valid_cancel_rollback();
+    if(approved!=ESP_OK){LOG_WARN("MVT OTA approval failed code=%d",int(approved));return;}
     if(trialTimer){xTimerStop(trialTimer,0);xTimerDelete(trialTimer,0);trialTimer=nullptr;}
     trial=false;percent=100;state=Updated;
 }

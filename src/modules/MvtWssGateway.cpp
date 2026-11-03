@@ -4,6 +4,7 @@
 #include "platform/esp32/MvtWssDiagnosticJson.h"
 #include "MvtRadioTiming.h"
 #include "modules/MvtOtaUpdater.h"
+#include "modules/MvtOtaHealth.h"
 #include "graphics/Screen.h"
 #include <cmath>
 #include "MvtPayload.h"
@@ -1147,7 +1148,9 @@ int32_t MvtWssGateway::runOnce() {
         lastWifiStatus = wifiStatus;
     }
     auto *radio=RadioLibInterface::instance;
-    mvtOtaUpdater.tick(authenticated&&socketConnected&&radio&&radio->getFreq()>0&&ESP.getFreeHeap()>32768);
+    mvtOtaUpdater.tick(mvtOtaHealth::ready(authenticated, socketConnected,
+        radio && radio->getFreq()>0, uint32_t(millis()-lastServerAckMs),
+        ESP.getFreeHeap(), ESP.getMaxAllocHeap()));
     if(mvtOtaUpdater.changed()&&authenticated&&mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));
     std::string room = moduleConfig.mqtt.username, secret = moduleConfig.mqtt.password, addr = moduleConfig.mqtt.address;
     if (room != configuredRoom || secret != configuredKey || addr != configuredAddress) {

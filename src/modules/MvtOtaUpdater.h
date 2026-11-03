@@ -37,7 +37,7 @@ private:
     struct Chunk {uint32_t offset;size_t length;uint8_t data[2048];};
     QueueHandle_t chunks=nullptr;
     std::string jobId,roomId,releaseId,version,hash,signature,error;
-    uint32_t nodeId=0,generation=0,bytes=0,healthySince=0;
+    uint32_t nodeId=0,generation=0,bytes=0,healthySince=0,lastHealthLog=0;
     bool trial=false;
     void run();
     void fail(const char *);
