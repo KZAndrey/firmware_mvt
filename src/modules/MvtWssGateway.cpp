@@ -839,7 +839,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if(!powered||!mvtOtaUpdater.start(j.get(),configuredRoom,nodeDB->getNodeNum())){
             auto *e=event("FIRMWARE_UPDATE_STATE");setString(e,"jobId",str(j.get(),"jobId"));
             setNumber(e,"nodeId",nodeDB->getNodeNum());setString(e,"state","failed");setNumber(e,"percent",0);
-            setString(e,"error",powered?"UPDATE_REJECTED":"LOW_POWER");publish(e);
+            setString(e,"error",powered?mvtOtaUpdater.startError():"LOW_POWER");publish(e);
         }else if(screen){screen->setOn(true);screen->forceDisplay();}
         return;
     }

@@ -46,6 +46,8 @@ bool testSendFailure = false;
 bool testSendBusy = false;
 bool testWsInitFailure = false, testWsStartFailure = false;
 bool testOtaWorkerRunning = false;
+const char *testOtaStartError = "UPDATE_REJECTED";
+unsigned testOtaStartCalls = 0;
 int testWsCreated = 0, testWsDestroyed = 0;
 // Flash NodeDB serialization is outside this host adapter; wire protobufs
 // still use the actual generated 2.7.15 descriptors and nanopb implementation.
@@ -131,6 +133,30 @@ int main(int argc, char **argv) {
         testSendFailure=true;CHECK(!g.sendDocument(e.get()));CHECK(!g.inputFault);
         testSendFailure=false;g.inputFault=false;
         testSent.pop_back();
+    }
+    {
+        const auto first=testSent.size();
+        const char *update="{\"type\":\"CMD_FIRMWARE_UPDATE\",\"jobId\":\"rejection-test\"}";
+        for(const char *reason : {"TASK_MEMORY","QUEUE_MEMORY","UPDATE_BUSY","UPDATE_UNSUPPORTED","UPDATE_TRANSFER","UPDATE_TARGET_CHANGED","UPDATE_REJECTED"}) {
+            testOtaStartError=reason;
+            const auto calls=testOtaStartCalls;
+            command(g,update);
+            auto rejected=lastEvent(g,"FIRMWARE_UPDATE_STATE");
+            CHECK(rejected!=nullptr);CHECK(testOtaStartCalls==calls+1);
+            CHECK(std::string(sget(rejected.get(),"error"))==reason);
+            CHECK(std::string(sget(rejected.get(),"jobId"))=="rejection-test");
+            CHECK(nget(rejected.get(),"nodeId")==db.getNodeNum());
+            CHECK(std::string(sget(rejected.get(),"state"))=="failed");
+        }
+        powerStatus=nullptr;
+        const auto calls=testOtaStartCalls;
+        command(g,update);
+        auto rejected=lastEvent(g,"FIRMWARE_UPDATE_STATE");
+        CHECK(std::string(sget(rejected.get(),"error"))=="LOW_POWER");
+        CHECK(testOtaStartCalls==calls);
+        powerStatus=&power;testOtaStartError="UPDATE_REJECTED";
+        // Fault-injection events are separate from the radio protocol transcript.
+        testSent.erase(testSent.begin()+first,testSent.end());
     }
     auto initialNode = lastEvent(g, "NODE_UPDATE");
     CHECK(nget(cJSON_GetObjectItem(initialNode.get(), "node"), "lastUpdateMs") == 1700000000000ULL);

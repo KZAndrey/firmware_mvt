@@ -14,6 +14,8 @@ class MvtOtaUpdater {
 public:
     void begin();
     bool start(const cJSON *,const std::string &,uint32_t);
+    // Synchronous start rejection; independent of an existing job/worker status.
+    const char *startError() const { return startRejection; }
     bool chunk(const cJSON *);
     void onDisconnect();
     bool workerRunning() const { return workerActive.load(); }
@@ -38,6 +40,7 @@ private:
     QueueHandle_t chunks=nullptr;
     std::string jobId,roomId,releaseId,version,hash,signature,error;
     uint32_t nodeId=0,generation=0,bytes=0,healthySince=0,lastHealthLog=0;
+    const char *startRejection="UPDATE_REJECTED";
     bool trial=false;
     void run();
     void fail(const char *);

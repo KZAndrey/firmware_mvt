@@ -78,8 +78,12 @@ cJSON *MvtOtaUpdater::status(uint32_t id) const {
     return j;
 }
 bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t id){
-    if(active()||workerRunning()||!supported()||std::string(text(command,"transfer"))!="wss-chunks-v2")return false;
-    if(std::string(text(command,"roomId"))!=room||num(command,"nodeId")!=id)return false;
+    startRejection="UPDATE_REJECTED";
+    auto reject=[this](const char *reason){startRejection=reason;return false;};
+    if(active()||workerRunning())return reject("UPDATE_BUSY");
+    if(!supported())return reject("UPDATE_UNSUPPORTED");
+    if(std::string(text(command,"transfer"))!="wss-chunks-v2")return reject("UPDATE_TRANSFER");
+    if(std::string(text(command,"roomId"))!=room||num(command,"nodeId")!=id)return reject("UPDATE_TARGET_CHANGED");
     const auto *m=cJSON_GetObjectItemCaseSensitive(command,"manifest");
     const std::string release=text(m,"releaseId"),v=text(m,"version"),h=text(m,"sha256"),imagePath=text(m,"imagePath"),job=text(command,"jobId");
     if(num(m,"schema")!=1||std::string(text(m,"model"))!="heltec-v3"||std::string(text(m,"chip"))!="esp32s3"||
@@ -94,13 +98,14 @@ bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t 
     generation=uint32_t(num(m,"generation"));bytes=uint32_t(num(m,"size"));signature=text(m,"signature");
     if(signature.size()!=344)return false;
     if(!chunks)chunks=xQueueCreate(1,sizeof(Chunk));
-    if(!chunks)return false;
+    if(!chunks)return reject("QUEUE_MEMORY");
     xQueueReset(chunks);downloadOffset=0;offeredOffset=UINT32_MAX;
     error.clear();percent=0;cancelRequested=false;state=Verifying;
     LOG_INFO("MVT OTA start bytes=%u heap=%u largest=%u",bytes,ESP.getFreeHeap(),ESP.getMaxAllocHeap());
     TaskHandle_t handle=nullptr;
     workerActive=true;
-    if(xTaskCreate([](void *ctx){auto *self=static_cast<MvtOtaUpdater *>(ctx);self->run();self->workerActive=false;vTaskDelete(nullptr);},"mvt-ota",12288,this,1,&handle)!=pdPASS){workerActive=false;fail("TASK_MEMORY");return false;}
+    if(xTaskCreate([](void *ctx){auto *self=static_cast<MvtOtaUpdater *>(ctx);self->run();self->workerActive=false;vTaskDelete(nullptr);},"mvt-ota",12288,this,1,&handle)!=pdPASS){workerActive=false;fail("TASK_MEMORY");return reject("TASK_MEMORY");}
+    startRejection=nullptr;
     return true;
 }
 bool MvtOtaUpdater::chunk(const cJSON *command){

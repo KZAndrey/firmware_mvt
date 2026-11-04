@@ -3,12 +3,15 @@
 #include <cJSON.h>
 #define MVT_OTA_GENERATION 1
 extern bool testOtaWorkerRunning;
+extern const char *testOtaStartError;
+extern unsigned testOtaStartCalls;
 struct MvtOtaUpdater {
  void begin(){}
  void onDisconnect(){}
  bool workerRunning()const{return testOtaWorkerRunning;}
  bool supported()const{return false;}
- bool start(const cJSON *,const std::string &,uint32_t){return false;}
+ bool start(const cJSON *,const std::string &,uint32_t){++testOtaStartCalls;return false;}
+ const char *startError()const{return testOtaStartError;}
  bool chunk(const cJSON *){return false;}
  void tick(bool){}
  bool changed(){return false;}

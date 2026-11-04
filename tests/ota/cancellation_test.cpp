@@ -29,7 +29,7 @@ uint32_t millis(){return ++clockMs;}
 void vTaskDelay(unsigned n){clockMs+=n;}
 int xTaskCreate(void (*f)(void *),const char *,unsigned,void *p,unsigned,TaskHandle_t *h){if(mode==7)return 0;task=f;taskContext=p;*h=p;return pdPASS;}
 void vTaskDelete(void *){++deletes;assert(cryptoLive==0&&shaLive==0&&opens==0);}
-QueueHandle_t xQueueCreate(unsigned count,size_t size){assert(count==1&&size==sizeof(Chunk));assert(queuesLive==0);++queuesLive;queue.size=size;queue.data.resize(size);return &queue;}
+QueueHandle_t xQueueCreate(unsigned count,size_t size){assert(count==1&&size==sizeof(Chunk));if(mode==8)return nullptr;assert(queuesLive==0);++queuesLive;queue.size=size;queue.data.resize(size);return &queue;}
 void vQueueDelete(QueueHandle_t){assert(queuesLive==1);--queuesLive;queue.data.clear();}
 int xQueueReset(QueueHandle_t){queue.full=false;return pdPASS;}
 int xQueueOverwrite(QueueHandle_t,const void *p){memcpy(queue.data.data(),p,queue.size);queue.full=true;return pdPASS;}
@@ -84,8 +84,15 @@ int main(){
         receives=opens=aborts=writes=boots=cryptoLive=shaLive=deletes=0;
         cJSON *j=command();assert(mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum())==(mode!=7));
         assert(mvtOtaUpdater.workerRunning()==(mode!=7));
+        // A failed task allocation must be reported immediately, before tick().
+        if(mode==7)assert(strcmp(mvtOtaUpdater.startError(),"TASK_MEMORY")==0);
         if(mode!=7){mvtOtaUpdater.tick(false);assert(queuesLive==1);}
-        if(mode!=7)assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
+        if(mode!=7){
+            assert(mvtOtaUpdater.startError()==nullptr);
+            assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
+            assert(strcmp(mvtOtaUpdater.startError(),"UPDATE_BUSY")==0);
+            assert(mvtOtaUpdater.workerRunning());
+        }
         if(mode==0)mvtOtaUpdater.onDisconnect();
         if(mode!=7)task(taskContext);
         assert(!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active());
@@ -98,5 +105,16 @@ int main(){
         assert(strcmp(cJSON_GetObjectItemCaseSensitive(s,"error")->valuestring,expected)==0);
         cJSON_Delete(s);cJSON_Delete(j);
     }
+    mode=8;
+    cJSON *j=command();
+    assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
+    assert(strcmp(mvtOtaUpdater.startError(),"QUEUE_MEMORY")==0);
+    assert(queuesLive==0&&!mvtOtaUpdater.workerRunning()&&boots==0);
+    assert(!mvtOtaUpdater.start(j,"WRONG_ROOM",db.getNodeNum()));
+    assert(strcmp(mvtOtaUpdater.startError(),"UPDATE_TARGET_CHANGED")==0);
+    cJSON_ReplaceItemInObjectCaseSensitive(j,"transfer",cJSON_CreateString("wrong"));
+    assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
+    assert(strcmp(mvtOtaUpdater.startError(),"UPDATE_TRANSFER")==0);
+    cJSON_Delete(j);
     puts("Production OTA cancellation: before start, crypto verification, waiting chunk, partial flash; timeout, flash/signature/task failures; queue released, retry allowed and boot unchanged: PASS");
 }
