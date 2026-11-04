@@ -193,8 +193,14 @@ int main(int argc, char **argv) {
     CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "FAILED");
     command(g, "{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"recipientId\":2864434397,\"waypoint\":{\"title\":\"Target\",\"comment\":\"точка\",\"latitude\":43.2,\"longitude\":76.8,\"altitude\":1234,\"isTarget\":true}}");
     CHECK(radio.sent.back().to == 0xaabbccdd); CHECK(mvt::decode(radio.sent.back().decoded.payload.bytes, radio.sent.back().decoded.payload.size, payload));
-    CHECK(payload.icon == 5 && payload.altitude == 1234 && payload.name == "Target");
+    CHECK(payload.icon == 5 && payload.altitude == 1234 && payload.name == "HQ" && payload.comment == u8"точка");
     CHECK(radio.sent.back().pki_encrypted && radio.sent.back().public_key.size == 32);
+    command(g, "{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"senderCallsign\":\"MVT_TEST\",\"waypoint\":{\"title\":\"QA050-ANIMATION\",\"comment\":\"\",\"latitude\":43.2,\"longitude\":76.8,\"isTarget\":true}}");
+    CHECK(mvt::decode(radio.sent.back().decoded.payload.bytes, radio.sent.back().decoded.payload.size, payload));
+    CHECK(payload.name == "MVT_TEST" && payload.comment == "QA050-ANIMATION" && payload.icon == 5);
+    command(g, "{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"waypoint\":{\"title\":\"My Location\",\"latitude\":43.2,\"longitude\":76.8}}");
+    CHECK(mvt::decode(radio.sent.back().decoded.payload.bytes, radio.sent.back().decoded.payload.size, payload));
+    CHECK(payload.name == "HQ" && payload.comment == "My Location");
     g.pending.clear();
     // Known node: position and telemetry, independently correlated and paced.
     command(g, "{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}"); sent = radio.sent.back();

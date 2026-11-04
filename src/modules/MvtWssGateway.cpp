@@ -913,8 +913,11 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         }
         const cJSON *wp = get(j.get(), "waypoint");
         mvt::Payload payload;
-        payload.name = chat ? str(j.get(), "senderCallsign", "HQ") : str(wp, "title", "HQ Waypoint");
+        // MV name identifies the sender. Point text belongs in comment, just as
+        // in the MQTT/phone encoders; receivers do not use name as point title.
+        payload.name = str(j.get(), "senderCallsign", "HQ");
         payload.comment = chat ? str(j.get(), "text") : str(wp, "comment");
+        if (waypoint && payload.comment.empty()) payload.comment = str(wp, "title", "Waypoint");
         payload.flags = chat ? 2 : 1;
         if (jsonBool(j.get(), "isSos") || (waypoint && jsonBool(wp, "isSos"))) payload.flags |= 4;
         if (waypoint) {
