@@ -3,6 +3,7 @@
 #include <cJSON.h>
 #define MVT_OTA_GENERATION 1
 extern bool testOtaWorkerRunning;
+extern bool testOtaActive;
 extern const char *testOtaStartError;
 extern unsigned testOtaStartCalls;
 struct MvtOtaUpdater {
@@ -15,7 +16,7 @@ struct MvtOtaUpdater {
  bool chunk(const cJSON *){return false;}
  void tick(bool){}
  bool changed(){return false;}
- bool active()const{return false;}
+ bool active()const{return testOtaActive;}
  bool hasStatus()const{return false;}
  cJSON *status(uint32_t)const{return cJSON_CreateObject();}
 };

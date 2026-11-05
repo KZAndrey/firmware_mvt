@@ -46,6 +46,9 @@ bool testSendFailure = false;
 bool testSendBusy = false;
 bool testWsInitFailure = false, testWsStartFailure = false;
 bool testOtaWorkerRunning = false;
+bool testOtaActive = false;
+unsigned testWifiRecoveryRequests = 0;
+bool requestWifiReconnect(){++testWifiRecoveryRequests;return true;}
 const char *testOtaStartError = "UPDATE_REJECTED";
 unsigned testOtaStartCalls = 0;
 int testWsCreated = 0, testWsDestroyed = 0;
@@ -648,6 +651,38 @@ int main(int argc, char **argv) {
         reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
         testMillis+=75000;reconnect.runOnce();CHECK(reconnect.transport.client==nullptr);CHECK(!reconnect.authenticated);
         testMillis+=15001;reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
+    }
+    // Reproduce connected WiFi + repeated DNS/TCP failures: socket retries
+    // alone never request a WiFi rejoin on the old implementation.
+    {
+        MvtWssGateway recovery;
+        recovery.configuredRoom=moduleConfig.mqtt.username;
+        recovery.configuredKey=moduleConfig.mqtt.password;
+        recovery.configuredAddress=moduleConfig.mqtt.address;
+        recovery.retryDelayMs=3600000;
+        recovery.lastConnectAttemptMs=testMillis;
+        testOtaActive=true;
+        const auto before=testWifiRecoveryRequests;
+        for(unsigned n=1;n<=3;++n){
+            testDiagnostic={};testDiagnostic.sequence=n;testDiagnostic.uptimeMs=testMillis;
+            strcpy(testDiagnostic.stage,"connect");testDiagnostic.tlsError=n==1?0x8001:0x8006;
+            recovery.runOnce();CHECK(testWifiRecoveryRequests==before);
+            if(n<3)testMillis+=60000;
+        }
+        testOtaActive=false;
+        testOtaWorkerRunning=true;
+        recovery.runOnce();CHECK(testWifiRecoveryRequests==before);
+        testOtaWorkerRunning=false;
+        recovery.connectWs();
+        recovery.runOnce();CHECK(testWifiRecoveryRequests==before);
+        recovery.disconnectWs();
+        recovery.runOnce();CHECK(testWifiRecoveryRequests==before+1);
+        for(unsigned n=4;n<20;++n){
+            testMillis+=60000;testDiagnostic.sequence=n;testDiagnostic.uptimeMs=testMillis;
+            recovery.runOnce();CHECK(testWifiRecoveryRequests==before+1);
+        }
+        CHECK(std::string(recovery.configuredKey)==moduleConfig.mqtt.password);
+        testDiagnostic={};
     }
     // Replay the gateway-visible result of TLS setup allocation failure:
     // DISCONNECTED before CONNECTED/AUTH. This is fault injection, not an

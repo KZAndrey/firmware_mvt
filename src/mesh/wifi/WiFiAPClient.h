@@ -24,6 +24,9 @@ void deinitWifi();
 
 bool isWifiAvailable();
 
+// Schedule the existing non-blocking rejoin path without changing mesh config.
+bool requestWifiReconnect();
+
 uint8_t getWifiDisconnectReason();
 
 #ifdef USE_WS5500

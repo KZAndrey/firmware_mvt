@@ -62,6 +62,15 @@ Syslog syslog(syslogClient);
 
 Periodic *wifiReconnect;
 
+bool requestWifiReconnect()
+{
+    if (!config.network.wifi_enabled || !config.network.wifi_ssid[0] || !wifiReconnect ||
+        needReconnect || isReconnecting || wifiReconnectPending) return false;
+    needReconnect = true;
+    wifiReconnect->setIntervalFromNow(1);
+    return true;
+}
+
 #ifdef USE_WS5500
 // Startup Ethernet
 bool initEthernet()

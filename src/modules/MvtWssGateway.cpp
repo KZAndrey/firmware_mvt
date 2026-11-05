@@ -1,6 +1,7 @@
 #include "configuration.h"
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtWssGateway.h"
+#include "mesh/wifi/WiFiAPClient.h"
 #include "platform/esp32/MvtWssDiagnosticJson.h"
 #include "MvtRadioTiming.h"
 #include "modules/MvtOtaUpdater.h"
@@ -1157,6 +1158,7 @@ int32_t MvtWssGateway::runOnce() {
     if(mvtOtaUpdater.changed()&&authenticated&&mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));
     std::string room = moduleConfig.mqtt.username, secret = moduleConfig.mqtt.password, addr = moduleConfig.mqtt.address;
     if (room != configuredRoom || secret != configuredKey || addr != configuredAddress) {
+        networkRecovery.clear();
         ++configurationEpoch;
         disconnectWs(); authBlocked = false; displayError = nullptr; retryDelayMs = 15000;
         outgoing.clear(); pending.clear(); polls.clear(); airPolls.clear(); completedCommands.clear();
@@ -1210,6 +1212,7 @@ int32_t MvtWssGateway::runOnce() {
     if (peerRejected) { authBlocked = true; if (!displayError) displayError = "BLOCK"; peerRejected = false; }
     if (connectionEnded) { disconnectWs(); return 100; }
     if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked || inputFault) {
+        networkRecovery.clear();
         if (transport.active()) disconnectWs();
         if (!moduleConfig.mqtt.enabled) { authBlocked = false; displayError = nullptr; }
         return 1000;
@@ -1227,6 +1230,18 @@ int32_t MvtWssGateway::runOnce() {
             }
             return 100;
         }
+        MvtWssDiagnostic diagnostic{};
+        if (mvt_wss_last_diagnostic(&diagnostic)) networkRecovery.observe(diagnostic, millis());
+        // Transport is joined and the OTA worker has released crypto/flash.
+        // Rejoin once per outage, only after sustained pre-session DNS/TCP failure.
+        if (!mvtOtaUpdater.active() && networkRecovery.due(millis())) {
+            if (requestWifiReconnect()) {
+                networkRecovery.recovered(millis());
+                lastConnectAttemptMs=millis();
+                LOG_WARN("MVT WSS network recovery: scheduled WiFi rejoin after persistent DNS/TCP failures");
+            }
+            return 1000;
+        }
         if (uint32_t(millis() - lastConnectAttemptMs) > retryDelayMs) { lastConnectAttemptMs = millis(); connectWs(); }
         return 100;
     }
@@ -1241,6 +1256,7 @@ int32_t MvtWssGateway::runOnce() {
         if (authSent && uint32_t(millis() - authStartedMs) > 30000) disconnectWs();
         return 100;
     }
+    networkRecovery.healthy();
     if (uint32_t(millis() - lastHeartbeatMs) >= 15000) sendHeartbeat();
     // Wait for a clock before replaying events; never send uptime as Unix time.
     if (!nowMs()) return 100;

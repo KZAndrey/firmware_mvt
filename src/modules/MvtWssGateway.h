@@ -4,6 +4,7 @@
 #include "mesh/generated/meshtastic/admin.pb.h"
 #include "concurrency/OSThread.h"
 #include "platform/esp32/MvtWssTransport.h"
+#include "MvtWssNetworkRecovery.h"
 #include <atomic>
 #include <WiFi.h>
 #include <cJSON.h>
@@ -69,6 +70,7 @@ private:
     std::deque<Poll> polls;
     void advancePolls();
     MvtWssTransport transport{handleWsEvent, this};
+    MvtWssNetworkRecovery networkRecovery;
     bool retiring = false, retirementNeedsDelay = false;
     uint32_t configurationEpoch = 0, retryDelayMs = 15000;
     QueueHandle_t incoming = nullptr;
