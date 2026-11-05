@@ -19,6 +19,12 @@
 extern "C" bool verifyRollbackLater(){return true;}
 MvtOtaUpdater mvtOtaUpdater;
 static TimerHandle_t trialTimer=nullptr;
+// Reserve the original 12 KiB stack before WSS/TLS can fragment the heap.
+// Keep the task alive between jobs: reusing a deleted static task's storage
+// before the idle task has finished cleanup is unsafe.
+static constexpr size_t otaStackBytes=12288;
+alignas(16) static StackType_t otaStack[otaStackBytes / sizeof(StackType_t)];
+static StaticTask_t otaTaskControl;
 static const char imageMarker[]="MVTOTA1:heltec-v3:" xstr(MVT_OTA_GENERATION) ":" xstr(APP_VERSION);
 namespace {
 const char *text(const cJSON *j,const char *key){auto *v=cJSON_GetObjectItemCaseSensitive(j,key);return cJSON_IsString(v)?v->valuestring:"";}
@@ -59,7 +65,7 @@ void MvtOtaUpdater::onDisconnect(){
     int s=state.load();
     if((s!=Downloading&&s!=Verifying)||cancelRequested.exchange(true))return;
     // Wake the download worker immediately, even when it is waiting for a
-    // chunk. Its stack/crypto resources must be released before reconnect TLS.
+    // chunk. Its crypto/flash resources must be released before reconnect TLS.
     static const Chunk stop={UINT32_MAX,0,{}};
     if(chunks)xQueueOverwrite(chunks,&stop);
 }
@@ -102,9 +108,17 @@ bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t 
     xQueueReset(chunks);downloadOffset=0;offeredOffset=UINT32_MAX;
     error.clear();percent=0;cancelRequested=false;state=Verifying;
     LOG_INFO("MVT OTA start bytes=%u heap=%u largest=%u",bytes,ESP.getFreeHeap(),ESP.getMaxAllocHeap());
-    TaskHandle_t handle=nullptr;
     workerActive=true;
-    if(xTaskCreate([](void *ctx){auto *self=static_cast<MvtOtaUpdater *>(ctx);self->run();self->workerActive=false;vTaskDelete(nullptr);},"mvt-ota",12288,this,1,&handle)!=pdPASS){workerActive=false;fail("TASK_MEMORY");return reject("TASK_MEMORY");}
+    if(!workerTask)workerTask=xTaskCreateStatic([](void *ctx){
+        auto *self=static_cast<MvtOtaUpdater *>(ctx);
+        for(;;){
+            ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
+            self->run();
+            self->workerActive=false;
+        }
+    },"mvt-ota",otaStackBytes,this,1,otaStack,&otaTaskControl);
+    if(!workerTask){workerActive=false;fail("TASK_MEMORY");return reject("TASK_MEMORY");}
+    xTaskNotifyGive(workerTask);
     startRejection=nullptr;
     return true;
 }

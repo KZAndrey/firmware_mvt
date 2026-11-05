@@ -20,6 +20,17 @@ static const esp_partition_t running{0x330000},target{0x330000};
 static void (*task)(void *)=nullptr;
 static void *taskContext=nullptr;
 static uint32_t clockMs=0;
+static int staticCreates=0,notifications=0;
+struct WorkerWaiting {};
+TaskHandle_t xTaskCreateStatic(void (*f)(void *),const char *,unsigned bytes,void *p,unsigned,StackType_t *stack,StaticTask_t *tcb){
+    assert(bytes==12288&&stack&&tcb);assert(++staticCreates==1);task=f;taskContext=p;return p;
+}
+int xTaskNotifyGive(TaskHandle_t h){assert(h==taskContext);++notifications;return pdPASS;}
+unsigned ulTaskNotifyTake(int clear,unsigned wait){
+    assert(clear==pdTRUE&&wait==portMAX_DELAY);
+    if(!notifications)throw WorkerWaiting{};
+    unsigned n=notifications;notifications=0;return n;
+}
 static int mode=0,receives=0,opens=0,aborts=0,writes=0,boots=0,cryptoLive=0,shaLive=0,deletes=0;
 struct Queue {size_t size=0;bool full=false;std::vector<uint8_t> data;};
 static Queue queue;
@@ -80,28 +91,27 @@ static cJSON *command(){
 }
 int main(){
     mvtOtaUpdater.begin();
-    for(mode=0;mode<8;++mode){
+    for(int scenario : {7,0,1,2,3,4,5,6}){
+        mode=scenario;
         receives=opens=aborts=writes=boots=cryptoLive=shaLive=deletes=0;
-        cJSON *j=command();assert(mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum())==(mode!=7));
-        assert(mvtOtaUpdater.workerRunning()==(mode!=7));
-        // A failed task allocation must be reported immediately, before tick().
-        if(mode==7)assert(strcmp(mvtOtaUpdater.startError(),"TASK_MEMORY")==0);
-        if(mode!=7){mvtOtaUpdater.tick(false);assert(queuesLive==1);}
-        if(mode!=7){
-            assert(mvtOtaUpdater.startError()==nullptr);
-            assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
-            assert(strcmp(mvtOtaUpdater.startError(),"UPDATE_BUSY")==0);
-            assert(mvtOtaUpdater.workerRunning());
-        }
+        cJSON *j=command();assert(mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
+        assert(mvtOtaUpdater.workerRunning());
+        // mode 7 denies dynamic task allocation; the reserved worker must still start.
+        mvtOtaUpdater.tick(false);assert(queuesLive==1);
+        assert(mvtOtaUpdater.startError()==nullptr);
+        assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
+        assert(strcmp(mvtOtaUpdater.startError(),"UPDATE_BUSY")==0);
+        assert(mvtOtaUpdater.workerRunning());
         if(mode==0)mvtOtaUpdater.onDisconnect();
-        if(mode!=7)task(taskContext);
+        try {task(taskContext);assert(false);} catch(const WorkerWaiting &) {}
+        assert(notifications==0&&staticCreates==1);
         assert(!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active());
         mvtOtaUpdater.tick(false);assert(queuesLive==0);
         mvtOtaUpdater.tick(false);assert(queuesLive==0);
-        assert(opens==0&&boots==0&&cryptoLive==0&&shaLive==0&&deletes==(mode==7?0:1));
-        assert(aborts==(mode>=2&&mode<=5?1:0));assert(writes==(mode==3||mode==5?1:0));
+        assert(opens==0&&boots==0&&cryptoLive==0&&shaLive==0&&deletes==0);
+        assert(aborts==((mode>=2&&mode<=5)||mode==7?1:0));assert(writes==(mode==3||mode==5?1:0));
         cJSON *s=mvtOtaUpdater.status(db.getNodeNum());
-        const char *expected=mode==4?"WSS_DOWNLOAD_TIMEOUT":mode==5?"FLASH_WRITE":mode==6?"BAD_SIGNATURE":mode==7?"TASK_MEMORY":"WSS_DISCONNECTED";
+        const char *expected=mode==4?"WSS_DOWNLOAD_TIMEOUT":mode==5?"FLASH_WRITE":mode==6?"BAD_SIGNATURE":"WSS_DISCONNECTED";
         assert(strcmp(cJSON_GetObjectItemCaseSensitive(s,"error")->valuestring,expected)==0);
         cJSON_Delete(s);cJSON_Delete(j);
     }
@@ -116,5 +126,5 @@ int main(){
     assert(!mvtOtaUpdater.start(j,"ROOM1",db.getNodeNum()));
     assert(strcmp(mvtOtaUpdater.startError(),"UPDATE_TRANSFER")==0);
     cJSON_Delete(j);
-    puts("Production OTA cancellation: before start, crypto verification, waiting chunk, partial flash; timeout, flash/signature/task failures; queue released, retry allowed and boot unchanged: PASS");
+    puts("Production OTA cancellation: before start, crypto verification, waiting chunk, partial flash; timeout, flash/signature failures, dynamic task exhaustion; persistent worker reused; queue released, retry allowed and boot unchanged: PASS");
 }

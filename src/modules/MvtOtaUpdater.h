@@ -33,6 +33,7 @@ private:
     std::atomic<unsigned> percent{0};
     std::atomic<bool> cancelRequested{false};
     std::atomic<bool> workerActive{false};
+    TaskHandle_t workerTask=nullptr;
     int lastState=-1,lastPercent=-1;
     uint32_t lastOffset=UINT32_MAX,lastStatusMs=0;
     std::atomic<uint32_t> downloadOffset{0},offeredOffset{UINT32_MAX};
