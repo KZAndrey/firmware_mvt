@@ -12,6 +12,8 @@ typedef struct {
     int opcode, payload, offset, duringSession;
 } MvtWssDiagnostic;
 bool mvt_wss_last_diagnostic(MvtWssDiagnostic *out);
+// Latest failed attempt, including connects after a retained session failure.
+bool mvt_wss_latest_diagnostic(MvtWssDiagnostic *out);
 #ifdef __cplusplus
 }
 #endif

@@ -20,6 +20,7 @@ RadioLibInterface *RadioLibInterface::instance = &testRadioInfo;
 #include "platform/esp32/MvtWssDiagnostics.h"
 MvtWssDiagnostic testDiagnostic = {};
 bool mvt_wss_last_diagnostic(MvtWssDiagnostic *out) { *out = testDiagnostic; return out->sequence != 0; }
+bool mvt_wss_latest_diagnostic(MvtWssDiagnostic *out) { *out = testDiagnostic; return out->sequence != 0; }
 #define private public
 #define protected public
 #include "modules/MvtWssGateway.h"

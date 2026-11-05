@@ -1231,7 +1231,7 @@ int32_t MvtWssGateway::runOnce() {
             return 100;
         }
         MvtWssDiagnostic diagnostic{};
-        if (mvt_wss_last_diagnostic(&diagnostic)) networkRecovery.observe(diagnostic, millis());
+        if (mvt_wss_latest_diagnostic(&diagnostic)) networkRecovery.observe(diagnostic, millis());
         // Transport is joined and the OTA worker has released crypto/flash.
         // Rejoin once per outage, only after sustained pre-session DNS/TCP failure.
         if (!mvtOtaUpdater.active() && networkRecovery.due(millis())) {
