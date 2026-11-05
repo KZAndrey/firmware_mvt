@@ -49,6 +49,12 @@ recovery_test = build / 'network_recovery_test.exe'
 subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/network_recovery_test.cpp',
                 '-o', str(recovery_test)], env=env, check=True)
 subprocess.run([str(recovery_test)], check=True)
+tls_read_test = build / 'tls_read_retry_test.exe'
+subprocess.run([zig, 'c++', '-std=c++14', '-O0', 'tests/wss/tls_read_retry_test.cpp', '-o', str(tls_read_test)], env=env, check=True)
+subprocess.run([str(tls_read_test)], check=True)
+tls_routing_test = build / 'tls_read_routing_test.exe'
+subprocess.run([zig, 'c++', '-std=c++14', '-O0', '-Itests/tls-read/stubs', '-Isrc', 'tests/tls-read/routing_test.cpp', 'src/platform/esp32/MvtTlsRead.cpp', '-o', str(tls_routing_test)], env=env, check=True)
+subprocess.run([str(tls_routing_test)], check=True)
 nanopb = root / '.pio/libdeps/heltec-v3/Nanopb'
 cjson = root / '.tools/cjson'
 if not (cjson / 'cJSON.c').exists():

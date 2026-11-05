@@ -120,3 +120,9 @@ large general-heap allocations as a fragmentation model, then check 1,000
 record-buffer reuse cycles, task isolation, fallback ownership, zeroing,
 overflow and concurrent pool use. This is allocator fault injection, not a
 measurement of ESP32 fragmentation or a substitute for on-device TLS tests.
+
+## Bounded TLS read retry (2026-11-05)
+
+ESP-IDF v4.4.7 transport_ssl.c propagates MBEDTLS_ERR_SSL_WANT_READ through esp_transport_read. The linker wrapper in MvtTlsRead.cpp retries only the registered gateway SSL parent within the original read timeout. It does not retry the WebSocket transport: partial headers remain inside the original parser call. EOF and fatal errors are unchanged. The single-gateway registration is removed after worker shutdown and before transport destruction. Host tests cover parser-buffer continuity, deadlines, wraparound and actual wrapper routing. Hardware OTA verification remains required.
+
+Upstream: https://github.com/espressif/esp-idf/blob/v4.4.7/components/tcp_transport/transport_ssl.c

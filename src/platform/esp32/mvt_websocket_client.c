@@ -23,6 +23,7 @@
 #include "esp_random.h"
 #include "esp_heap_caps.h"
 #include "MvtTlsMemory.h"
+#include "MvtTlsRead.h"
 #include "MvtWssDiagnostics.h"
 
 #include "esp_websocket_client.h"
@@ -456,6 +457,8 @@ esp_websocket_client_handle_t esp_websocket_client_init(const esp_websocket_clie
         esp_transport_ssl_skip_common_name_check(ssl);
     }
 
+    if (!mvt_tls_read_register(ssl)) goto _websocket_init_fail;
+
     esp_transport_handle_t wss = esp_transport_ws_init(ssl);
     ESP_WS_CLIENT_MEM_CHECK(TAG, wss, goto _websocket_init_fail);
 
@@ -532,6 +535,7 @@ esp_err_t esp_websocket_client_destroy(esp_websocket_client_handle_t client)
         free(client->if_name);
     }
     esp_websocket_client_destroy_config(client);
+    if (client->transport_list) mvt_tls_read_unregister(esp_transport_list_get_transport(client->transport_list, "_ssl"));
     esp_transport_list_destroy(client->transport_list);
     vQueueDelete(client->lock);
     free(client->tx_buffer);
