@@ -139,3 +139,19 @@ adapter with `-fno-lto`, keeping GCC `used`, `noinline`, and
 runs automatically; it can also be run manually with `tests/tls-read/check-linked-wrapper.py <xtensa-objdump> <elf>`
 to verify its actual windowed-ABI entry. A passing binary check still requires
 hardware boot/OTA health confirmation. Keep the ELF and map with tested images.
+
+### Bounded TLS write retry (2026-11-05)
+
+SLV generation 34 OTA to 35 failed after 50% with write=-26752
+(MBEDTLS_ERR_SSL_WANT_WRITE), errno=11, free heap 7252, largest block 1332.
+It reauthenticated about 20 seconds later without reboot. This establishes the
+immediate abort path, not the underlying cause of memory pressure/backpressure.
+The same isolated adapter now retries WANT_WRITE/WANT_READ for the registered
+SSL parent with identical pointer/length within the original timeout. It never
+restarts WebSocket headers; EOF, short writes, fatal errors and exhausted waits
+still reach the existing abort path. Both linked entry points are checked.
+
+Contract: https://mbed-tls.readthedocs.io/projects/api/en/v2.28.6/api/file/ssl_8h/
+Native regression: the original passthrough fails the transient-write assertion;
+fixed routing tests cover mixed transient results, timeout, unchanged arguments,
+short/zero/fatal results and unregister isolation. Hardware OTA remains required.
