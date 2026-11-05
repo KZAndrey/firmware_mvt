@@ -1,4 +1,3 @@
-#include "configuration.h"
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtTlsRead.h"
 #include "MvtTlsReadRetry.h"
@@ -18,7 +17,14 @@ extern "C" void mvt_tls_read_unregister(esp_transport_handle_t t) {
     if(t) __atomic_compare_exchange_n(&tlsParent,&t,nullptr,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
 }
 extern "C" int __real_esp_transport_read(esp_transport_handle_t,char*,int,int);
-extern "C" int __wrap_esp_transport_read(esp_transport_handle_t t,char* buffer,int len,int timeout) {
+// SDK --wrap references require a real externally callable entry point.
+// The LTO build produced an entry inside websocket_task and a hardware panic.
+// The pre-build rule also compiles this adapter without LTO; verify the ELF.
+extern "C"
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((used, noinline, externally_visible))
+#endif
+int __wrap_esp_transport_read(esp_transport_handle_t t,char* buffer,int len,int timeout) {
     if(!t || t!=__atomic_load_n(&tlsParent,__ATOMIC_ACQUIRE)) return __real_esp_transport_read(t,buffer,len,timeout);
     const uint32_t started=uint32_t(esp_timer_get_time()/1000);
     unsigned retries=0;

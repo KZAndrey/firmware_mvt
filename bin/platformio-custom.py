@@ -5,6 +5,7 @@ import sys
 import os
 from os.path import join
 import subprocess
+import shutil
 import json
 import re
 import time
@@ -14,6 +15,19 @@ from readprops import readProps
 
 Import("env")
 platform = env.PioPlatform()
+
+def mvt_verify_tls_wrapper(source, target, env):
+    objdump = shutil.which(env.subst("$CXX").replace("g++", "objdump"),
+                           path=env["ENV"]["PATH"])
+    if not objdump:
+        raise RuntimeError("Xtensa objdump not found; cannot validate TLS entry")
+    subprocess.run([sys.executable, join(env.subst("$PROJECT_DIR"),
+                    "tests", "tls-read", "check-linked-wrapper.py"),
+                    objdump, str(target[0])], check=True)
+
+if env.subst("$PIOENV") == "heltec-v3":
+    env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", mvt_verify_tls_wrapper)
+
 
 
 def esp32_create_combined_bin(source, target, env):

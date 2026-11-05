@@ -126,3 +126,16 @@ measurement of ESP32 fragmentation or a substitute for on-device TLS tests.
 ESP-IDF v4.4.7 transport_ssl.c propagates MBEDTLS_ERR_SSL_WANT_READ through esp_transport_read. The linker wrapper in MvtTlsRead.cpp retries only the registered gateway SSL parent within the original read timeout. It does not retry the WebSocket transport: partial headers remain inside the original parser call. EOF and fatal errors are unchanged. The single-gateway registration is removed after worker shutdown and before transport destruction. Host tests cover parser-buffer continuity, deadlines, wraparound and actual wrapper routing. Hardware OTA verification remains required.
 
 Upstream: https://github.com/espressif/esp-idf/blob/v4.4.7/components/tcp_transport/transport_ssl.c
+
+### Xtensa LTO entry-point regression
+
+The first hardware OTA of generation 33 reached 100%, then panicked before
+health confirmation and rolled back. Its saved disassembly placed
+`__wrap_esp_transport_read` at 0x420340b8 inside another function, with a call
+at 0x420340bd to the crash location 0x4204918c. Host routing tests cannot detect
+this link-time failure. Function attributes alone did not fix the linked address. Compile this
+adapter with `-fno-lto`, keeping GCC `used`, `noinline`, and
+`externally_visible` as additional protection. The Heltec V3 post-link check
+runs automatically; it can also be run manually with `tests/tls-read/check-linked-wrapper.py <xtensa-objdump> <elf>`
+to verify its actual windowed-ABI entry. A passing binary check still requires
+hardware boot/OTA health confirmation. Keep the ELF and map with tested images.
