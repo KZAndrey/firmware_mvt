@@ -850,6 +850,39 @@ int main(int argc, char **argv) {
         command(secure,(std::string("{\"type\":\"CMD_TX_LORA_WAYPOINT\",\"id\":9204,\"recipientId\":4294967295")+wp).c_str());
         CHECK(radio.sent.back().to==NODENUM_BROADCAST && !radio.sent.back().pki_encrypted);
     }
+    // Chat-origin bit survives WSS -> radio -> WSS for broadcast and private chat.
+    {
+        MvtWssGateway mecc; healthyTick(mecc); mecc.socketConnected=true; healthyTick(mecc);
+        mecc.authenticated=true;
+        command(mecc,"{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1791892800000}");
+        unsigned id=9400;
+        for (bool origin : {false,true}) for (uint32_t recipient : {NODENUM_BROADCAST,uint32_t(0xaabbccdd)}) {
+            mecc.pending.clear();
+            const std::string cmd=std::string("{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":")+std::to_string(++id)+
+                ",\"recipientId\":"+std::to_string(recipient)+",\"senderCallsign\":\"HQ\",\"text\":\"Hello\",\"viaMecc\":"+(origin?"true":"false")+"}";
+            const auto before=radio.sent.size();command(mecc,cmd.c_str());
+            CHECK(radio.sent.size()==before+1);
+            const auto &tx=radio.sent.back();
+            CHECK(mvt::decode(tx.decoded.payload.bytes,tx.decoded.payload.size,payload));
+            CHECK(payload.flags==(origin?0x42:0x02));
+            CHECK(payload.name=="HQ" && payload.comment=="Hello");
+            CHECK(tx.pki_encrypted==(recipient!=NODENUM_BROADCAST));
+            auto rx=incoming(0xaabbccdd,++id,meshtastic_PortNum_PRIVATE_APP);
+            rx.to=recipient==NODENUM_BROADCAST?NODENUM_BROADCAST:db.getNodeNum();
+            rx.pki_encrypted=recipient!=NODENUM_BROADCAST;
+            rx.decoded.payload=tx.decoded.payload;
+            mecc.handleReceived(rx);
+            auto event=lastEvent(mecc,"CHAT_MESSAGE");auto *message=cJSON_GetObjectItem(event.get(),"message");
+            CHECK(cJSON_IsTrue(cJSON_GetObjectItem(message,"viaMecc"))==origin);
+            CHECK(std::string(sget(message,"text"))=="Hello");
+        }
+        // A reserved bit on a beacon/point alone must not label it as portal chat.
+        auto rx=incoming(0xaabbccdd,++id,meshtastic_PortNum_PRIVATE_APP);
+        payload.flags=0x41;payload.lat=49;payload.lon=82;
+        rx.decoded.payload.size=mvt::encode(payload,rx.decoded.payload.bytes,sizeof(rx.decoded.payload.bytes));
+        mecc.handleReceived(rx);auto event=lastEvent(mecc,"CHAT_MESSAGE");
+        CHECK(!cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetObjectItem(event.get(),"message"),"viaMecc")));
+    }
     // Golden MV bytes produced by the portal's actual encoder.
     if (argc > 1) {
         std::ifstream vectors(argv[1]); std::string line;

@@ -675,6 +675,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
             if (mp.to != NODENUM_BROADCAST) cJSON_AddStringToObject(msg, "encryption", mp.pki_encrypted ? "PKI" : "CHANNEL");
             cJSON_AddStringToObject(msg, "senderCallsign", mv.name.c_str());
             cJSON_AddStringToObject(msg, "text", mv.comment.c_str());
+            cJSON_AddBoolToObject(msg, "viaMecc", (mv.flags & 2) && (mv.flags & 0x40));
             cJSON_AddNumberToObject(msg, "timestampMs", double(nowMs()));
             cJSON_AddBoolToObject(msg, "isSos", mv.flags & 4); cJSON_AddNumberToObject(msg, "hops", hops);
             cJSON_AddStringToObject(msg, "status", "RECEIVED");
@@ -920,6 +921,8 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         payload.comment = chat ? str(j.get(), "text") : str(wp, "comment");
         if (waypoint && payload.comment.empty()) payload.comment = str(wp, "title", "Waypoint");
         payload.flags = chat ? 2 : 1;
+        // Optional chat-origin hint. Older receivers ignore this reserved bit.
+        if (chat && jsonBool(j.get(), "viaMecc")) payload.flags |= 0x40;
         if (jsonBool(j.get(), "isSos") || (waypoint && jsonBool(wp, "isSos"))) payload.flags |= 4;
         if (waypoint) {
             payload.lat = number(wp, "latitude", NAN); payload.lon = number(wp, "longitude", NAN);

@@ -1,0 +1,33 @@
+name: MOVETAIN gateway protocol
+on:
+  push:
+    paths: ['src/modules/MvtWssGateway*', 'src/modules/MvtPayload*', 'tests/wss/**', '.github/workflows/test_mvt_gateway.yml']
+  pull_request:
+    paths: ['src/modules/MvtWssGateway*', 'src/modules/MvtPayload*', 'tests/wss/**', '.github/workflows/test_mvt_gateway.yml']
+permissions:
+  contents: read
+jobs:
+  handlers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: nanopb/nanopb
+          ref: cad3c18ef15a663e30e3e43e3a752b66378adec1
+          path: .tools/nanopb
+      - uses: actions/checkout@v4
+        with:
+          repository: DaveGamble/cJSON
+          ref: v1.7.19
+          path: .tools/cjson
+      - name: Test production WSS handlers, PKI and MECC chat origin
+        shell: bash
+        run: |
+          flags=(-DPB_ENABLE_MALLOC=1 -Itests/wss/stubs -Isrc -Isrc/mesh/generated -I.tools/nanopb -I.tools/cjson)
+          for source in .tools/nanopb/pb_common.c .tools/nanopb/pb_decode.c .tools/nanopb/pb_encode.c .tools/cjson/cJSON.c; do
+            gcc "${flags[@]}" -c "$source" -o "/tmp/$(basename "$source").o"
+          done
+          g++ -std=c++11 "${flags[@]}" tests/wss/gateway_test.cpp src/modules/MvtWssGateway.cpp src/mesh/generated/meshtastic/*.cpp /tmp/pb_*.c.o /tmp/cJSON.c.o -o /tmp/mvt-gateway-test
+          timeout 30s /tmp/mvt-gateway-test
