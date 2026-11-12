@@ -1953,7 +1953,9 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                     oldestIndex = i;
                 }
                 // The oldest "boring" node
-                if (!meshNodes->at(i).is_favorite && !meshNodes->at(i).is_ignored && meshNodes->at(i).user.public_key.size == 0 &&
+                if (!meshNodes->at(i).is_favorite && !meshNodes->at(i).is_ignored &&
+                    !(meshNodes->at(i).bitfield & NODEINFO_BITFIELD_IS_KEY_MANUALLY_VERIFIED_MASK) &&
+                    meshNodes->at(i).user.public_key.size == 0 &&
                     meshNodes->at(i).last_heard < oldestBoring) {
                     oldestBoring = meshNodes->at(i).last_heard;
                     oldestBoringIndex = i;
@@ -1971,6 +1973,12 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                 }
                 (numMeshNodes)--;
             }
+        }
+        // All entries may be protected. Callers already handle admission failure;
+        // never increment the count or overwrite a trusted record in this case.
+        if (size_t(numMeshNodes) >= meshNodes->size()) {
+            LOG_WARN("Node database full: no evictable entry for 0x%x", n);
+            return nullptr;
         }
         // add the node at the end
         lite = &meshNodes->at((numMeshNodes)++);

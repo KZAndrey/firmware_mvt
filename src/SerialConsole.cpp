@@ -5,6 +5,10 @@
 #include "Throttle.h"
 #include "configuration.h"
 #include "time.h"
+#if HAS_MVT_WSS_GATEWAY && MVT_WSS_STRESS_TEST
+#include "modules/MvtWssStressControl.h"
+#include "modules/MvtWssStressLog.h"
+#endif
 
 #if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
 #define IS_USB_SERIAL
@@ -127,6 +131,14 @@ bool SerialConsole::handleToRadio(const uint8_t *buf, size_t len)
 {
     // only talk to the API once the configuration has been loaded and we're sure the serial port is not disabled.
     if (config.has_lora && config.security.serial_enabled) {
+#if HAS_MVT_WSS_GATEWAY && MVT_WSS_STRESS_TEST
+        if (const unsigned command=mvtStressDecode(buf,len)) {
+            unsigned empty=0;
+            const bool accepted=mvtStressMailbox.compare_exchange_strong(empty,command);
+            MVT_STRESS_LOG("MVT_STRESS usb command=%u accepted=%u",command,unsigned(accepted));
+            return true;
+        }
+#endif
         // Switch to protobufs for log messages
         usingProtobufs = true;
         canWrite = true;

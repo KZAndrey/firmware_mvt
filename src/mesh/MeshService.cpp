@@ -47,7 +47,21 @@ the new node can build its node db)
 MeshService *service;
 
 #define MAX_MQTT_PROXY_MESSAGES 16
+#if HAS_MVT_WSS_GATEWAY
+#include "BoundedHeapPool.h"
+// Both allocation call sites are MQTT::publish in task context. Phone delivery
+// releases ownership through the unchanged Allocator interface.
+class MqttProxyPool : public Allocator<meshtastic_MqttClientProxyMessage> {
+    BoundedHeapPool<meshtastic_MqttClientProxyMessage, MAX_MQTT_PROXY_MESSAGES> storage;
+protected:
+    meshtastic_MqttClientProxyMessage *alloc(TickType_t) override { return storage.allocate(); }
+public:
+    void release(meshtastic_MqttClientProxyMessage *p) override { storage.release(p); }
+};
+static MqttProxyPool staticMqttClientProxyMessagePool;
+#else
 static MemoryPool<meshtastic_MqttClientProxyMessage, MAX_MQTT_PROXY_MESSAGES> staticMqttClientProxyMessagePool;
+#endif
 
 #define MAX_QUEUE_STATUS 4
 static MemoryPool<meshtastic_QueueStatus, MAX_QUEUE_STATUS> staticQueueStatusPool;

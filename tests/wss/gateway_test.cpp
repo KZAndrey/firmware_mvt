@@ -17,8 +17,28 @@ RadioLibInterface *RadioLibInterface::instance = &testRadioInfo;
 #include "esp_websocket_client.h"
 #include "concurrency/OSThread.h"
 #include <cJSON.h>
+#include <cstdlib>
+#include <new>
+static bool rejectCppAllocation=false;
+bool testAdmissionFull=false;
+static unsigned jsonAllocations=0,jsonLive=0;
+static bool rejectJsonAllocation=false;
+static unsigned failJsonAt=0;
+static void *trackedJsonAlloc(size_t n){++jsonAllocations;if(rejectJsonAllocation||(failJsonAt&&jsonAllocations==failJsonAt))return nullptr;void *p=std::malloc(n);if(p)++jsonLive;return p;}
+static void trackedJsonFree(void *p){if(p){assert(jsonLive>0);--jsonLive;std::free(p);}}
+void *operator new(std::size_t size){
+    if(rejectCppAllocation)throw std::bad_alloc();
+    if(void *p=std::malloc(size?size:1))return p;
+    throw std::bad_alloc();
+}
+void operator delete(void *p) noexcept {std::free(p);}
+void operator delete(void *p,std::size_t) noexcept {std::free(p);}
 #include "platform/esp32/MvtWssDiagnostics.h"
 MvtWssDiagnostic testDiagnostic = {};
+#if MVT_WSS_STRESS_TEST
+#include "modules/MvtWssStressControl.h"
+bool testHeapIntegrity=true;
+#endif
 bool mvt_wss_boot_diagnostic(MvtWssBootDiagnostic *out) {
     *out = {17,3,0,2,0,0,0}; return true;
 }
@@ -63,6 +83,11 @@ int checks = 0;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while(0)
 using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
 Json parse(const std::string &s) { return Json(cJSON_Parse(s.c_str()), cJSON_Delete); }
+Json wireObject(cJSON *source) {
+    Json owned(source,cJSON_Delete);
+    char *text=cJSON_PrintUnformatted(source);
+    Json result(text?cJSON_Parse(text):nullptr,cJSON_Delete);cJSON_free(text);return result;
+}
 const char *sget(cJSON *j, const char *key) { auto *v = cJSON_GetObjectItemCaseSensitive(j, key); return cJSON_IsString(v) ? v->valuestring : ""; }
 double nget(cJSON *j, const char *key) { auto *v = cJSON_GetObjectItemCaseSensitive(j, key); return cJSON_IsNumber(v) ? v->valuedouble : 0; }
 void frame(MvtWssGateway &g, const std::string &s, size_t chunk = 2048, const char **firstBuffer = nullptr) {
@@ -142,6 +167,61 @@ int main(int argc, char **argv) {
         testSent.pop_back();
     }
     {
+        auto e=parse("{\"type\":\"GATEWAY_HEARTBEAT\",\"gatewayInfo\":{\"diagnostic\":\"payload larger than the string small-buffer storage\"}}");
+        testSendBusy=true;
+        bool threw=false,accepted=true;
+        rejectCppAllocation=true;
+        try{accepted=g.sendDocument(e.get());}catch(const std::bad_alloc&){threw=true;}
+        rejectCppAllocation=false;testSendBusy=false;
+        CHECK(!threw);CHECK(!accepted);CHECK(g.socketConnected);
+        cJSON_Hooks hooks{trackedJsonAlloc,trackedJsonFree};cJSON_InitHooks(&hooks);
+        rejectJsonAllocation=true;jsonAllocations=0;
+        CHECK(!g.sendDocument(e.get()));CHECK(jsonAllocations>0);CHECK(jsonLive==0);
+        g.socketConnected=false;jsonAllocations=0;CHECK(!g.sendDocument(e.get()));CHECK(jsonAllocations==0);g.socketConnected=true;
+        rejectJsonAllocation=false;testSendBusy=true;
+        CHECK(!g.sendDocument(e.get()));CHECK(jsonLive==0);
+        testSendBusy=false;CHECK(g.sendDocument(e.get()));CHECK(jsonLive==0);
+        cJSON_InitHooks(nullptr);testSent.pop_back();
+    }
+    {
+        const auto sentBefore=testSent.size();
+        g.snapshot.push_back("N!aabbccdd");g.snapshotPending=true;
+        g.outgoing.push_back("{\"type\":\"TEST_BACKPRESSURE\"}");
+        testAdmissionFull=true;
+        cJSON_Hooks hooks{trackedJsonAlloc,trackedJsonFree};cJSON_InitHooks(&hooks);jsonAllocations=0;
+        g.sendHeartbeat();g.sendAuthGateway();g.sendSnapshot();g.runOnce();
+        CHECK(jsonAllocations==0&&jsonLive==0);CHECK(g.snapshot.size()==1&&g.outgoing.size()==1);
+        CHECK(testSent.size()==sentBefore);
+        cJSON_InitHooks(nullptr);testAdmissionFull=false;flush(g);
+        CHECK(g.snapshot.empty()&&g.outgoing.empty());
+        CHECK(lastEvent(g,"TEST_BACKPRESSURE")!=nullptr);
+        testSent.erase(testSent.begin()+sentBefore,testSent.end());
+    }
+    {
+        cJSON_Hooks hooks{trackedJsonAlloc,trackedJsonFree};cJSON_InitHooks(&hooks);
+        testSendBusy=true;const bool savedAuthSent=g.authSent;
+        const auto savedDiagnostic=testDiagnostic;
+        for(unsigned operation=0;operation<4;++operation){
+            testDiagnostic=savedDiagnostic;
+            if(operation>=2){testDiagnostic.sequence=1;std::strcpy(testDiagnostic.stage,"connect");testDiagnostic.tlsError=0x8001;}
+            auto sendInfo=[&](){if(operation%2)g.sendAuthGateway();else g.sendHeartbeat();};
+            jsonAllocations=0;failJsonAt=0;sendInfo();const unsigned allocations=jsonAllocations;CHECK(jsonLive==0);
+            // Bounded wire diagnostics avoid the per-field tree entirely.
+            // Original rich auth needed 182 allocations; static keys needed 141.
+            const unsigned limits[]={90,94,97,101};
+            CHECK(allocations<=limits[operation]);
+            for(unsigned fault=1;fault<=allocations;++fault){
+                jsonAllocations=0;failJsonAt=fault;sendInfo();
+                if(jsonLive)std::fprintf(stderr,"gateway operation=%u allocation fault=%u leaked=%u\n",operation,fault,jsonLive);
+                CHECK(jsonLive==0);
+            }
+            std::printf("PASS gateway JSON OOM operation=%u: %u individual allocation failures, no retained blocks\n",operation,allocations);
+        }
+        testDiagnostic=savedDiagnostic;
+        g.authSent=savedAuthSent;
+        failJsonAt=0;testSendBusy=false;cJSON_InitHooks(nullptr);
+    }
+    {
         const auto first=testSent.size();
         const char *update="{\"type\":\"CMD_FIRMWARE_UPDATE\",\"jobId\":\"rejection-test\"}";
         for(const char *reason : {"TASK_MEMORY","QUEUE_MEMORY","UPDATE_BUSY","UPDATE_UNSUPPORTED","UPDATE_TRANSFER","UPDATE_TARGET_CHANGED","UPDATE_REJECTED"}) {
@@ -167,7 +247,7 @@ int main(int argc, char **argv) {
     }
     auto initialNode = lastEvent(g, "NODE_UPDATE");
     CHECK(nget(cJSON_GetObjectItem(initialNode.get(), "node"), "lastUpdateMs") == 1700000000000ULL);
-    auto gateway = Json(g.gatewayInfo(), cJSON_Delete);
+    auto gateway = wireObject(g.gatewayInfo());
     CHECK(!cJSON_GetObjectItem(gateway.get(), "lastDisconnectDiag"));
     CHECK(!cJSON_GetObjectItem(gateway.get(), "lastAttemptDiag"));
     auto *bootDiagnostic=cJSON_GetObjectItem(gateway.get(), "bootDiagnostic");
@@ -175,7 +255,7 @@ int main(int argc, char **argv) {
     CHECK(nget(bootDiagnostic,"bootCount")==2&&nget(bootDiagnostic,"sleepIntent")==0);
     testDiagnostic.sequence=1;testDiagnostic.bootId=17;testDiagnostic.tlsError=32776;
     strcpy(testDiagnostic.stage,"read");
-    auto diagnosticGateway = Json(g.gatewayInfo(), cJSON_Delete);
+    auto diagnosticGateway = wireObject(g.gatewayInfo());
     auto *diagnostic = cJSON_GetObjectItem(diagnosticGateway.get(), "lastDisconnectDiag");
     CHECK(nget(diagnostic,"tlsError")==32776);
     CHECK(nget(diagnostic,"bootId")==17);
@@ -200,6 +280,58 @@ int main(int argc, char **argv) {
         if (nget(data,"nodeId") == unknown.num) CHECK(nget(data,"lastUpdateMs") == 0);
     }
     CHECK(snapshotNodes == 2);
+    // Dense RF environments: a complete NodeDB snapshot must stream one node
+    // at a time, retain its cursor under backpressure and not silently stop at
+    // the separate 96-entry enriched-node cache limit. Host logic/capacity test,
+    // not a claim that 1000 NodeInfoLite objects fit in ESP32 RAM.
+    {
+        auto savedDb=std::move(db.nodes);auto savedNodes=std::move(g.nodes);
+        auto savedWaypoints=std::move(g.waypoints);
+        for(unsigned count: {200u,1000u}){
+            db.nodes.clear();g.nodes.clear();g.snapshot.clear();g.snapshotNodes.clear();g.waypoints.clear();
+            for(unsigned i=0;i<count;++i){
+                meshtastic_NodeInfoLite n={};n.num=0x22000000+i;n.has_user=true;
+                std::snprintf(n.user.long_name,sizeof(n.user.long_name),"Dense test node %u",i);
+                std::snprintf(n.user.short_name,sizeof(n.user.short_name),"%03u",i%1000);
+                n.last_heard=1700000000;db.nodes.push_back(n);
+            }
+            g.authenticated=false;
+            auto localCache=parse("{}");cJSON_AddNumberToObject(localCache.get(),"temperature",25);
+            g.cacheNode("!11223344",localCache.get());
+            for(const auto &n:db.nodes){g.publishNode(g.nodeDocument(n.num));CHECK(g.nodeCacheBytes()<=8192);}
+            CHECK(g.nodes.count("!11223344")==1);
+            auto retainedLocal=parse(g.nodes.at("!11223344").document);CHECK(nget(retainedLocal.get(),"temperature")==25);
+            CHECK(!g.nodes.empty()&&g.nodes.size()<=96);
+            size_t cachedBytes=0;for(const auto &n:g.nodes)cachedBytes+=n.first.size()+n.second.document.size();
+            const auto initialCachedEntries=g.nodes.size(),initialCacheAccounted=g.nodeCacheBytes();
+            CHECK(cachedBytes<=8192); // dense-network RAM budget regression
+            auto large=parse("{}");std::string content(5000,'x');
+            cJSON_AddStringToObject(large.get(),"comment",content.c_str());
+            g.cacheNode("!22000000",large.get());CHECK(g.nodeCacheBytes()<=8192&&g.nodes.count("!11223344"));
+            content.assign(9000,'x');cJSON_ReplaceItemInObject(large.get(),"comment",cJSON_CreateString(content.c_str()));
+            g.cacheNode("!22000000",large.get());CHECK(g.nodeCacheBytes()<=8192&&!g.nodes.count("!22000000"));
+            g.authenticated=true;g.snapshotPending=true;
+            const size_t start=testSent.size();testAdmissionFull=true;g.sendSnapshot();
+            CHECK(g.snapshot.empty()&&g.snapshotPending&&testSent.size()==start);
+            testAdmissionFull=false;g.sendSnapshot();CHECK(g.snapshotNodes.size()==count-1&&g.snapshot.empty());
+            const auto cursor=g.snapshotNodes.front();testAdmissionFull=true;g.sendSnapshot();
+            CHECK(g.snapshotNodes.size()==count-1&&g.snapshotNodes.front()==cursor&&testSent.size()==start+1);
+            testAdmissionFull=false;
+            for(unsigned i=1;i<count;++i)g.sendSnapshot();
+            CHECK(g.snapshot.empty()&&g.snapshotNodes.empty()&&!g.snapshotPending&&testSent.size()==start+count);
+            std::set<uint32_t> ids;size_t maxFrame=0;
+            for(size_t i=start;i<testSent.size();++i){
+                auto e=parse(testSent[i]);auto *n=cJSON_GetObjectItem(e.get(),"node");
+                CHECK(n&&cJSON_IsTrue(cJSON_GetObjectItem(e.get(),"snapshot")));
+                CHECK(ids.insert(uint32_t(nget(n,"nodeId"))).second);
+                maxFrame=std::max(maxFrame,testSent[i].size());
+            }
+            CHECK(ids.size()==count&&maxFrame<=8192);
+            std::printf("PASS dense NodeDB: nodes=%u initial_cached=%u initial_serialized_bytes=%u initial_accounted_bytes=%u after_oversize_cached=%u max_frame=%u complete_unique_snapshot_under_backpressure\n",count,unsigned(initialCachedEntries),unsigned(cachedBytes),unsigned(initialCacheAccounted),unsigned(g.nodes.size()),unsigned(maxFrame));
+            testSent.erase(testSent.begin()+start,testSent.end());
+        }
+        db.nodes=std::move(savedDb);g.nodes=std::move(savedNodes);g.waypoints=std::move(savedWaypoints);
+    }
     // JSON escaping, signed Android node ID, exact ID and channel, binary MV.
     command(g, u8"{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":42,\"recipientId\":-1430532899,\"senderCallsign\":\"HQ\",\"text\":\"Привет \\\"А\\\"\\nстрока\",\"isSos\":true}");
     CHECK(radio.sent.size() == 1); auto sent = radio.sent.back();
@@ -401,6 +533,21 @@ int main(int argc, char **argv) {
     CHECK(g.waypoints.size() == 2);
     command(g, "{\"type\":\"WAYPOINT_DELETED\",\"latitude\":43.25,\"longitude\":76.9,\"title\":\"Fast Location\"}");
     CHECK(g.waypoints.size() == 1); CHECK(g.waypoints.begin()->second.find("SOS Emergency") != std::string::npos);
+    // Queue count alone must not permit eight maximum-size RX frames or
+    // thirty-two large offline events to occupy the entire internal heap.
+    {
+        MvtWssGateway bounded;
+        frame(bounded,std::string(6000,' '));frame(bounded,std::string(6000,' '));
+        frame(bounded,std::string(6000,' '));
+        CHECK(bounded.inputFault&&bounded.incoming->values.size()==2);
+        bounded.disconnectWs();CHECK(bounded.incoming->values.empty());
+        for(int n=0;n<32;++n){auto *e=cJSON_CreateObject();cJSON_AddStringToObject(e,"text",std::string(2000,'x').c_str());bounded.publish(e);}
+        size_t retained=0;for(const auto &e:bounded.outgoing)retained+=e.capacity()+1;
+        CHECK(retained<=16384);
+        for(int n=0;n<64;++n){auto *w=cJSON_CreateObject();cJSON_AddNumberToObject(w,"latitude",n);cJSON_AddStringToObject(w,"comment",std::string(300,'w').c_str());bounded.publishWaypoint(w);}
+        size_t waypointBytes=0;for(const auto &w:bounded.waypoints)waypointBytes+=w.first.capacity()+w.second.capacity()+2+sizeof(w)+64;
+        CHECK(waypointBytes<=8192);
+    }
     // Packet fragments assemble before dispatch; control frames do not pollute JSON.
     // One persisted radio setting applies to portal and normal device packets.
     CHECK(g.effectiveHopLimit() == config.lora.hop_limit);
@@ -431,9 +578,9 @@ int main(int argc, char **argv) {
     // second payload-sized allocation while the consumer allocates JSON.
     CHECK(g.frame.capacity() < padded.size());
     CHECK(g.incoming->values.size() == 1);
-    auto *queuedFrame = static_cast<std::string *>(g.incoming->values.front());
+    auto *queuedFrame = static_cast<MvtWssRxBuffer *>(g.incoming->values.front());
     CHECK(queuedFrame->data() == receivedBuffer);
-    CHECK(*queuedFrame == padded);
+    CHECK(queuedFrame->size()==padded.size()&&!memcmp(queuedFrame->data(),padded.data(),padded.size()));
     healthyTick(g); CHECK(radio.sent.size() == count + 1);
     esp_websocket_event_data_t d = {"ping", 4, 9, nullptr, nullptr, 4, 0}; g.receiveFrame(d); CHECK(!g.inputFault);
     d = {"bad", 3, 1, nullptr, nullptr, 3, 1}; g.receiveFrame(d); CHECK(g.inputFault);
@@ -662,6 +809,19 @@ int main(int argc, char **argv) {
         testMillis+=75000;reconnect.runOnce();CHECK(reconnect.transport.client==nullptr);CHECK(!reconnect.authenticated);
         testMillis+=15001;reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
     }
+    // Receiving a valid bounded frame must not throw on allocation failure.
+    {
+        MvtWssGateway failedRx;
+        const std::string payload(8192, ' ');
+        bool escaped=false;
+        rejectCppAllocation=true;
+        try { frame(failedRx,payload,111); } catch(const std::bad_alloc &) { escaped=true; }
+        rejectCppAllocation=false;
+        CHECK(!escaped);
+        CHECK(failedRx.inputFault&&failedRx.incoming->values.empty());
+        CHECK(failedRx.incomingBytes.load()==0);
+        failedRx.disconnectWs();
+    }
     // A latched frame fault with an already idle receiver must be retired.
     {
         MvtWssGateway fault;
@@ -700,6 +860,66 @@ int main(int argc, char **argv) {
         testMillis+=14999;fault.runOnce();CHECK(testWsCreated==created);
         testMillis+=2;fault.runOnce();CHECK(fault.transport.active());
     }
+#if MVT_WSS_STRESS_TEST
+    // Exercise the actual USB-controlled gateway actions, without touching
+    // persistent configuration or allowing disruption during an OTA worker.
+    {
+        MvtWssGateway stress;
+        const auto address=std::string(moduleConfig.mqtt.address);
+        for(unsigned command: {3u,4u,5u}) {
+            stress.authenticated=true;stress.socketConnected=true;WiFi.state=3;
+            mvtStressMailbox=command;stress.stressTick();
+            CHECK(stress.stressWifiHeld&&!WiFi.autoReconnect&&WiFi.state!=3);
+            const auto cycle=stress.stressCycle;
+            mvtStressMailbox=2;stress.stressTick();CHECK(stress.stressCycle==cycle);
+            testMillis+=mvtStressDuration(command)-1;stress.stressTick();CHECK(stress.stressWifiHeld);
+            testMillis+=1;stress.stressTick();CHECK(!stress.stressWifiHeld&&WiFi.autoReconnect&&mvtStressWifiUntil==0);
+        }
+        stress.authenticated=true;stress.socketConnected=true;WiFi.state=3;
+        mvtStressMailbox=7;stress.stressTick();CHECK(stress.stressBadTargetUntil!=0);
+        testMillis+=60000;stress.stressTick();CHECK(stress.stressBadTargetUntil==0);
+        stress.authenticated=true;stress.socketConnected=true;
+        mvtStressMailbox=5;stress.stressTick();CHECK(stress.stressWifiHeld);
+        mvtStressMailbox=6;stress.stressTick();CHECK(!stress.stressWifiHeld&&WiFi.autoReconnect);
+        const auto cycle=stress.stressCycle;
+        testOtaWorkerRunning=true;mvtStressMailbox=2;stress.stressTick();CHECK(stress.stressCycle==cycle);testOtaWorkerRunning=false;
+        testOtaActive=true;mvtStressMailbox=2;stress.stressTick();CHECK(stress.stressCycle==cycle);testOtaActive=false;
+        stress.authenticated=false;mvtStressMailbox=2;stress.stressTick();CHECK(stress.stressCycle==cycle);
+        stress.authenticated=true;stress.socketConnected=true;
+        mvtStressMailbox=8;stress.stressTick();CHECK(stress.inputFault);stress.inputFault=false;
+        mvtStressMailbox=9;stress.stressTick();CHECK(stress.snapshotPending);
+        testOtaWorkerRunning=true;mvtStressMailbox=11;stress.stressTick();CHECK(!stress.stressRadioPending);testOtaWorkerRunning=false;
+        testOtaActive=true;mvtStressMailbox=11;stress.stressTick();CHECK(!stress.stressRadioPending);testOtaActive=false;
+        stress.authenticated=false;stress.socketConnected=false;
+        mvtStressMailbox=11;stress.stressTick();CHECK(stress.stressRadioPending&&!mvtStressRadioReset);
+        testOtaWorkerRunning=true;stress.stressTick();CHECK(stress.stressRadioPending&&!mvtStressRadioReset);testOtaWorkerRunning=false;
+        stress.stressTick();CHECK(!stress.stressRadioPending&&mvtStressRadioReset);mvtStressRadioReset=false;
+        testOtaWorkerRunning=true;mvtStressMailbox=12;stress.stressTick();CHECK(mvtStressTxLimit==0&&!stress.stressRadioPending);testOtaWorkerRunning=false;
+        mvtStressMailbox=12;stress.stressTick();CHECK(mvtStressTxLimit==4&&stress.stressRadioPending);
+        stress.stressTick();CHECK(mvtStressRadioReset);mvtStressRadioReset=false;
+        mvtStressMailbox=13;stress.stressTick();CHECK(mvtStressTxLimit==0&&stress.stressRadioPending);
+        stress.stressTick();CHECK(mvtStressRadioReset);mvtStressRadioReset=false;
+        mvtStressMailbox=12;stress.stressTick();mvtStressMailbox=6;stress.stressTick();CHECK(mvtStressTxLimit==0&&stress.stressRadioPending);
+        stress.stressTick();CHECK(mvtStressRadioReset);mvtStressRadioReset=false;
+        testOtaActive=true;mvtStressMailbox=14;stress.stressTick();CHECK(mvtStressTxLimit==0&&!stress.stressRadioPending);testOtaActive=false;
+        mvtStressMailbox=14;stress.stressTick();CHECK(mvtStressTxLimit==8&&stress.stressRadioPending);
+        stress.stressTick();mvtStressRadioReset=false;
+        mvtStressMailbox=6;stress.stressTick();CHECK(mvtStressTxLimit==0&&stress.stressRadioPending);
+        stress.stressTick();mvtStressRadioReset=false;
+        // Recovery controls work while disconnected, but never during OTA.
+        stress.authenticated=false;stress.socketConnected=false;
+        testOtaActive=true;mvtStressMailbox=16;stress.stressTick();CHECK(!stress.stressRejoinPending);testOtaActive=false;
+        testOtaWorkerRunning=true;mvtStressMailbox=16;stress.stressTick();CHECK(!stress.stressRejoinPending);testOtaWorkerRunning=false;
+        mvtStressMailbox=16;stress.stressTick();CHECK(stress.stressRejoinPending&&!mvtStressRadioReset);
+        stress.stressTick();CHECK(!stress.stressRejoinPending&&!mvtStressRadioReset);
+        mvtStressMailbox=15;stress.stressTick();CHECK(!stress.stressRejoinPending&&!mvtStressRadioReset&&!stress.authenticated);
+        testHeapIntegrity=false;mvtStressMailbox=1;stress.stressTick();CHECK(stress.stressHalted);
+        testHeapIntegrity=true;const auto haltedCycle=stress.stressCycle;
+        mvtStressMailbox=2;stress.stressTick();CHECK(stress.stressCycle==haltedCycle);
+        mvtStressMailbox=11;stress.stressTick();CHECK(!stress.stressRadioPending&&!mvtStressRadioReset);
+        CHECK(std::string(moduleConfig.mqtt.address)==address);WiFi.state=3;
+    }
+#endif
     // Reproduce connected WiFi + repeated DNS/TCP failures: socket retries
     // alone never request a WiFi rejoin on the old implementation.
     {
@@ -727,7 +947,7 @@ int main(int argc, char **argv) {
         recovery.runOnce();CHECK(testWifiRecoveryRequests==before+1);
         for(unsigned n=4;n<20;++n){
             testMillis+=60000;testDiagnostic.sequence=n;testDiagnostic.uptimeMs=testMillis;
-            recovery.runOnce();CHECK(testWifiRecoveryRequests==before+1);
+            recovery.runOnce();CHECK(testWifiRecoveryRequests==before+(n<13?1:2));
         }
         CHECK(std::string(recovery.configuredKey)==moduleConfig.mqtt.password);
         testDiagnostic={};

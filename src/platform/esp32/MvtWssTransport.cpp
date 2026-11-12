@@ -1,5 +1,6 @@
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtWssTransport.h"
+#include "modules/MvtWssStressMemory.h"
 #include <cstdlib>
 #include <cstring>
 #ifdef ESP_PLATFORM
@@ -50,25 +51,40 @@ bool MvtWssTransport::start(const std::string &address, const char *ca, uint32_t
 void MvtWssTransport::stop() { stopping = true; online = false; }
 
 bool MvtWssTransport::send(const std::string &text, bool priority, bool replay) {
-    if (!connected() || state != Running || text.empty() || text.size() > 8192) return false;
-    if (messages.fetch_add(1) >= MAX_MESSAGES) { --messages; return false; }
-    if (bytes.fetch_add(text.size()) + text.size() > MAX_BYTES) {
-        bytes.fetch_sub(text.size()); --messages; return false;
+    return send(text.data(),text.size(),priority,replay);
+}
+
+bool MvtWssTransport::send(const char *text, size_t length, bool priority, bool replay) {
+    return sendBuffer(text,length,nullptr,priority,replay);
+}
+bool MvtWssTransport::sendOwned(char *text,size_t length,void (*dispose)(void *),bool priority,bool replay) {
+    return dispose && sendBuffer(text,length,dispose,priority,replay);
+}
+bool MvtWssTransport::sendBuffer(const char *text,size_t length,void (*dispose)(void *),bool priority,bool replay) {
+    if (!connected() || state != Running || !text || !length || length > 8192) return false;
+    if (messages.fetch_add(1) >= (priority?MAX_MESSAGES:MAX_MESSAGES-1)) { --messages; return false; }
+    if (bytes.fetch_add(length) + length > MAX_BYTES) {
+        bytes.fetch_sub(length); --messages; return false;
     }
-    auto *entry = static_cast<Entry *>(malloc(sizeof(Entry) + text.size()));
-    if (!entry) { bytes.fetch_sub(text.size()); --messages; return false; }
-    entry->size = text.size(); entry->epoch = epoch; entry->replay = replay;
-    memcpy(entry->text, text.c_str(), text.size() + 1);
-    if (xSemaphoreTake(admission, 0) != pdTRUE) { release(entry); return false; }
+    auto *entry = static_cast<Entry *>(malloc(sizeof(Entry) + (dispose?0:length+1)));
+    if (!entry) { bytes.fetch_sub(length); --messages; return false; }
+    entry->size = length; entry->epoch = epoch; entry->replay = replay;
+    entry->dispose=dispose;
+    entry->text=dispose?const_cast<char *>(text):reinterpret_cast<char *>(entry+1);
+    if(!dispose){memcpy(entry->text, text, length);entry->text[length]=0;}
+    mvtStressMemoryMark(9,length);
+    if (xSemaphoreTake(admission, 0) != pdTRUE) { entry->dispose=nullptr;release(entry); return false; }
     const bool accepted = connected() && state == Running &&
         xQueueSend(priority ? urgent : pending, &entry, 0) == pdTRUE;
     xSemaphoreGive(admission);
-    if (!accepted) release(entry);
+    if (!accepted) { entry->dispose=nullptr;release(entry); }
     return accepted;
 }
 
 void MvtWssTransport::release(Entry *entry) {
-    bytes.fetch_sub(entry->size); --messages; free(entry);
+    bytes.fetch_sub(entry->size); --messages;
+    if(entry->dispose)entry->dispose(entry->text);
+    free(entry);
 }
 
 void MvtWssTransport::undelivered(Entry *entry) {
@@ -104,6 +120,7 @@ void MvtWssTransport::run() {
     Entry *inFlight = nullptr;
     while (!exiting.load()) {
         if (state == Starting && !stopping.load()) {
+            mvtStressMemoryMark(12);
             esp_websocket_client_config_t cfg = {};
             cfg.uri = url.c_str(); cfg.cert_pem = certificate;
             cfg.task_stack = 6144; cfg.buffer_size = 2048;
@@ -135,7 +152,9 @@ void MvtWssTransport::run() {
             if (!inFlight && xQueueReceive(urgent, &inFlight, 0) != pdTRUE)
                 xQueueReceive(pending, &inFlight, 0);
             if (inFlight) {
+                mvtStressMemoryMark(13,inFlight->size);
                 const int sent = esp_websocket_client_send_text(client, inFlight->text, inFlight->size, pdMS_TO_TICKS(5000));
+                mvtStressMemoryMark(14,inFlight->size);
                 if (sent == int(inFlight->size)) { release(inFlight); inFlight = nullptr; }
                 else if (!(sent < 0 && esp_websocket_client_is_connected(client))) {
                     // Do not append another frame after a short/failed write.

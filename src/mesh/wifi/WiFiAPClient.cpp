@@ -9,6 +9,10 @@
 #include "mesh/api/WiFiServerAPI.h"
 #include "target_specific.h"
 #include <WiFi.h>
+#if HAS_MVT_WSS_GATEWAY && MVT_WSS_STRESS_TEST
+#include "modules/MvtWssStressControl.h"
+#include "modules/MvtWssStressLog.h"
+#endif
 
 #if HAS_ETHERNET && defined(USE_WS5500)
 #include <ETHClass2.h>
@@ -162,6 +166,30 @@ static void onNetworkConnected()
 
 static int32_t reconnectWiFi()
 {
+#if HAS_MVT_WSS_GATEWAY && MVT_WSS_STRESS_TEST
+    static bool driverOff=false;
+    static uint32_t driverRestoreAt=0;
+    if(mvtStressRadioReset.exchange(false)){
+        WiFi.setAutoReconnect(false);
+        const bool stopped=WiFi.mode(WIFI_OFF);
+        driverOff=true;driverRestoreAt=millis()+2000;
+        MVT_STRESS_LOG("MVT_STRESS radio_off ok=%u uptime=%u",unsigned(stopped),unsigned(millis()));
+        return 2000;
+    }
+    if(driverOff){
+        if(mvtStressBefore(millis(),driverRestoreAt))return 100;
+        const bool started=WiFi.mode(WIFI_STA);
+        WiFi.setHostname(ourHost);
+        if(config.network.address_mode==meshtastic_Config_NetworkConfig_AddressMode_STATIC&&config.network.ipv4_config.ip)
+            WiFi.config(config.network.ipv4_config.ip,config.network.ipv4_config.gateway,config.network.ipv4_config.subnet,config.network.ipv4_config.dns);
+        WiFi.setSleep(false);esp_wifi_set_ps(WIFI_PS_NONE);WiFi.setAutoReconnect(true);
+        needReconnect=false;isReconnecting=false;wifiReconnectPending=false;driverOff=false;
+        WiFi.begin(config.network.wifi_ssid,config.network.wifi_psk[0]?config.network.wifi_psk:nullptr);
+        MVT_STRESS_LOG("MVT_STRESS radio_on ok=%u uptime=%u",unsigned(started),unsigned(millis()));
+        return 1000;
+    }
+    if (mvtStressBefore(millis(),mvtStressWifiUntil.load())) return 100;
+#endif
     const char *wifiName = config.network.wifi_ssid;
     const char *wifiPsw = config.network.wifi_psk;
 

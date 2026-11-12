@@ -43,6 +43,7 @@ private:
     uint32_t nodeId=0,generation=0,bytes=0,healthySince=0,lastHealthLog=0;
     const char *startRejection="UPDATE_REJECTED";
     bool trial=false;
+    const esp_partition_t *updatePartition=nullptr;
     void run();
     void fail(const char *);
 };

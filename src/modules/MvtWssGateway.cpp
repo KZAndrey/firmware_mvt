@@ -10,6 +10,7 @@
 #include <cmath>
 #include "MvtPayload.h"
 #include "MvtRootCA.h"
+#include "MvtWssStressMemory.h"
 #include "MeshService.h"
 #include "NodeDB.h"
 #include "TypeConversions.h"
@@ -26,11 +27,136 @@
 #include <memory>
 #include <new>
 #include <utility>
+#if MVT_WSS_STRESS_TEST
+#include "MvtWssStressControl.h"
+#include "MvtWssStressLog.h"
+#include "MvtWssStressNetwork.h"
+#include "esp_heap_caps.h"
+#endif
 
 MvtWssGateway *mvtWssGateway = nullptr;
+#if MVT_WSS_STRESS_TEST
+void MvtWssGateway::stressSample(const char *phase) {
+    static bool formatChecked=false;
+    if(!formatChecked&&!strcmp(phase,"sample")){
+        formatChecked=true;
+        char legacy[32];std::snprintf(legacy,sizeof(legacy),"%lld",4294967295LL);
+        MVT_STRESS_LOG("MVT_STRESS legacy_integer value=%s expected=4294967295",legacy);
+        if(auto *boot=mvtWssBootJson(true)){
+            MVT_STRESS_LOG("MVT_STRESS boot_wire=%s",boot->valuestring);
+            cJSON_Delete(boot);
+        }
+    }
+    multi_heap_info_t info{};
+    heap_caps_get_info(&info,MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    const bool valid=heap_caps_check_integrity_all(false);
+    // Use ESP logging directly: the ordinary logger allocates on every call.
+    MVT_STRESS_LOG("MVT_HEAP phase=%s cycle=%u free=%u largest=%u minimum=%u integrity=%u wifi=%u active=%u auth=%u",
+        phase,unsigned(stressCycle),unsigned(info.total_free_bytes),unsigned(info.largest_free_block),
+        unsigned(info.minimum_free_bytes),unsigned(valid),unsigned(WiFi.status()),
+        unsigned(transport.active()),unsigned(authenticated));
+    MVT_STRESS_LOG("MVT_STRESS memory cycle=%u freeBlocks=%u allocatedBlocks=%u frameCapacity=%d nodes=%u waypoints=%u",
+        unsigned(stressCycle),unsigned(info.free_blocks),unsigned(info.allocated_blocks),
+        transport.active()?-1:int(frame.capacity()),unsigned(nodes.size()),unsigned(waypoints.size()));
+    MVT_STRESS_LOG("MVT_STRESS queues cycle=%u incoming=%u outgoing=%u txMessages=%u txBytes=%u mainStack=%u workerStack=%u uptime=%u",
+        unsigned(stressCycle),unsigned(incoming?uxQueueMessagesWaiting(incoming):0),unsigned(outgoing.size()),
+        transport.queuedMessages(),transport.queuedBytes(),unsigned(uxTaskGetStackHighWaterMark(nullptr)),
+        transport.workerStackMinimum(),unsigned(millis()));
+    MvtWssDiagnostic diagnostic{};
+    if(mvt_wss_latest_diagnostic(&diagnostic))
+        MVT_STRESS_LOG("MVT_STRESS diagnostic sequence=%u stage=%s ret=%d error=%d socket=%d tls=%d code=%d flags=%d duringSession=%d uptime=%u",
+            unsigned(diagnostic.sequence),diagnostic.stage,diagnostic.ret,diagnostic.error,
+            diagnostic.socketError,diagnostic.tlsError,diagnostic.tlsCode,diagnostic.tlsFlags,
+            diagnostic.duringSession,unsigned(diagnostic.uptimeMs));
+    if (!valid) { stressHalted=true; MVT_STRESS_LOG("MVT_STRESS HALTED heap_integrity"); }
+}
+void MvtWssGateway::stressTick() {
+    const uint32_t now=millis();
+    if(!stressHalted&&!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active())mvtStressNetTick();
+    else mvtStressNetCancel();
+    if(stressRejoinPending&&!transport.active()&&!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active()){
+        if(requestWifiReconnect()){
+            mvtStressNetCancel();stressRejoinPending=false;
+            MVT_STRESS_LOG("MVT_STRESS rejoin_requested uptime=%u",unsigned(now));
+        }
+    }
+    if(stressRadioPending&&!transport.active()&&!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active()){
+        if(requestWifiReconnect()){
+            mvtStressNetCancel();mvtStressRadioReset=true;stressRadioPending=false;
+            MVT_STRESS_LOG("MVT_STRESS radio_reset_requested uptime=%u",unsigned(now));
+        }
+    }
+    if (stressWifiHeld && !mvtStressBefore(now,mvtStressWifiUntil.load())) {
+        mvtStressWifiUntil=0; stressWifiHeld=false; WiFi.setAutoReconnect(true);
+        requestWifiReconnect(); MVT_STRESS_LOG("MVT_STRESS wifi_restore cycle=%u",unsigned(stressCycle));
+    }
+    if (stressBadTargetUntil && !mvtStressBefore(now,stressBadTargetUntil)) {
+        stressBadTargetUntil=0; disconnectWs(); MVT_STRESS_LOG("MVT_STRESS target_restore cycle=%u",unsigned(stressCycle));
+    }
+    if (stressIdlePending && !transport.active() && uint32_t(now-stressIdleAt)>=1000) {
+        stressIdlePending=false; stressSample("idle");
+    }
+    const unsigned command=mvtStressMailbox.exchange(0);
+    if (!command) return;
+    if (command==1) { stressSample("sample"); return; }
+    if (command==10) {
+        if(!stressHalted&&!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active())mvtStressNetStart();
+        return;
+    }
+    if(command==15||command==16){
+        if(stressHalted||mvtOtaUpdater.workerRunning()||mvtOtaUpdater.active()||stressWifiHeld||stressBadTargetUntil||stressRadioPending||stressRejoinPending){
+            MVT_STRESS_LOG("MVT_STRESS recovery_rejected command=%u busy",command);return;
+        }
+        mvtStressNetCancel();
+        stressRejoinPending=command==16;
+        MVT_STRESS_LOG("MVT_STRESS recovery_begin command=%u uptime=%u",command,unsigned(now));
+        disconnectWs();return;
+    }
+    if (command==11||command==12||command==13||command==14||command==17||command==18) {
+        if(stressHalted||mvtOtaUpdater.workerRunning()||mvtOtaUpdater.active()||stressWifiHeld||stressBadTargetUntil){
+            MVT_STRESS_LOG("MVT_STRESS radio_reset_rejected busy");return;
+        }
+        if(command==12)mvtStressTxLimit=4;
+        if(command==14)mvtStressTxLimit=8; // bounded RX/TX profile, USB trial only
+        if(command==17)mvtStressTxLimit=16; // four static DMA TX buffers, USB trial only
+        if(command==18)mvtStressTxLimit=32; // two static TX buffers, original cache count
+        if(command==13)mvtStressTxLimit=0;
+        stressRadioPending=true;disconnectWs();return;
+    }
+    if (command==6) {
+        mvtStressNetCancel();stressRadioPending=false;stressRejoinPending=false;
+        mvtStressWifiUntil=0;stressBadTargetUntil=0;
+        if(mvtStressTxLimit.exchange(0)!=0){stressRadioPending=true;disconnectWs();}
+        if(stressWifiHeld){stressWifiHeld=false;WiFi.setAutoReconnect(true);requestWifiReconnect();}
+        MVT_STRESS_LOG("MVT_STRESS cancelled cycle=%u",unsigned(stressCycle));return;
+    }
+    if(stressHalted||mvtOtaUpdater.workerRunning()||mvtOtaUpdater.active()||stressWifiHeld||stressBadTargetUntil||!isWsConnected()){
+        MVT_STRESS_LOG("MVT_STRESS rejected command=%u busy_or_not_ready",command);return;
+    }
+    ++stressCycle;stressSample("before");
+    if(stressHalted)return;
+    MVT_STRESS_LOG("MVT_STRESS begin command=%u cycle=%u duration=%u",command,unsigned(stressCycle),unsigned(mvtStressDuration(command)));
+    if(command>=3&&command<=5){
+        mvtStressWifiUntil=now+mvtStressDuration(command);stressWifiHeld=true;
+        WiFi.setAutoReconnect(false);WiFi.disconnect(false,false);
+    } else if(command==7){
+        stressBadTargetUntil=now+mvtStressDuration(command);disconnectWs();
+    } else if(command==8){
+        inputFault=true;
+    } else if(command==9){
+        snapshotPending=true;
+    } else { disconnectWs(); }
+}
+#endif
 namespace {
 using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
 Json json(cJSON *p) { return Json(p, cJSON_Delete); }
+// cJSON does not take ownership when attaching fails (including key OOM).
+// Every caller here transfers a newly created/detached child.
+bool addOwnedItem(cJSON *parent,const char *key,cJSON *child) {
+    if(cJSON_AddItemToObject(parent,key,child))return true;
+    cJSON_Delete(child);return false;
+}
 const cJSON *get(const cJSON *p, const char *key) { return cJSON_GetObjectItemCaseSensitive(p, key); }
 const char *str(const cJSON *p, const char *key, const char *fallback = "") {
     const cJSON *v = get(p, key); return cJSON_IsString(v) ? v->valuestring : fallback;
@@ -57,7 +183,7 @@ bool identifier(const cJSON *p, const char *key, uint32_t &out, uint32_t fallbac
 }
 std::string hex(uint32_t n) { char buf[9]; snprintf(buf, sizeof(buf), "%08x", n); return buf; }
 std::string key(uint32_t n, bool mv = false) { return "!" + hex(n) + (mv ? "_mv" : ""); }
-std::string serialize(cJSON *p) {
+std::string serialize(const cJSON *p) {
     char *s = cJSON_PrintUnformatted(p); if (!s) return "";
     std::string result(s); cJSON_free(s); return result;
 }
@@ -150,13 +276,14 @@ const char *presetName(int value) {
     }
 }
 const size_t MAX_FRAME = 16384, MAX_NODES = 96, MAX_EVENTS = 32, MAX_PENDING = 16;
+const size_t NODE_CACHE_BUDGET = 8192;
 const uint32_t ACK_TIMEOUT = 120000;
 }
 
 MvtWssGateway::MvtWssGateway() : MeshModule("mvt_wss"), concurrency::OSThread("mvt_wss", 100) {
     mvtWssGateway = this;
     isPromiscuous = true; encryptedOk = false; loopbackOk = true;
-    incoming = xQueueCreate(8, sizeof(std::string *));
+    incoming = xQueueCreate(8, sizeof(MvtWssRxBuffer *));
     mvtOtaUpdater.begin();
 }
 MvtWssGateway::~MvtWssGateway() {
@@ -196,6 +323,8 @@ void MvtWssGateway::handleWsEvent(void *args, esp_event_base_t, int32_t id, void
     else if (id == WEBSOCKET_EVENT_DATA && data) self->receiveFrame(*static_cast<esp_websocket_event_data_t *>(data));
 }
 void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
+    if(inputFault)return;
+    mvtStressMemoryMark(0,d.data_len>0?unsigned(d.data_len):0);
     // IDF splits large frames into buffer-sized events. Control frames must
     // never be interpreted as JSON or appended to an unfinished text frame.
     if (d.op_code == 8 && d.data_ptr && d.data_len >= 2) {
@@ -208,21 +337,29 @@ void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
     }
     if (d.payload_offset == 0) {
         if (!frame.empty()) { inputFault = true; return; }
-        frameExpected = d.payload_len; frame.reserve(frameExpected);
+        // Single producer; consumer can only reduce the queued byte count.
+        // Preserve the maximum individual frame, bound its accumulated backlog.
+        if(size_t(d.payload_len)>MAX_FRAME-incomingBytes.load()){inputFault=true;return;}
+        frameExpected = d.payload_len;
+        if (!frame.reserve(frameExpected)) { inputFault = true; return; }
+        mvtStressMemoryMark(17,frameExpected);
     }
     if (frameExpected != size_t(d.payload_len) || frame.size() != size_t(d.payload_offset) ||
         size_t(d.data_len) > frameExpected - frame.size() || (!d.data_ptr && d.data_len)) {
         inputFault = true; return;
     }
     if (d.data_len && memchr(d.data_ptr, 0, d.data_len)) { inputFault = true; return; }
-    if (d.data_len) frame.append(d.data_ptr, d.data_len);
+    if (d.data_len && !frame.append(d.data_ptr, d.data_len)) { inputFault = true; return; }
     if (frame.size() == frameExpected) {
         // Transfer the completed buffer instead of allocating a second full
         // frame. During OTA that spare ~2.9 KiB competes with cJSON's base64
         // string allocation on the ESP32's fragmented internal heap.
-        auto *message = new (std::nothrow) std::string(std::move(frame));
+        auto *message = new (std::nothrow) MvtWssRxBuffer(std::move(frame));
         if (message) {
-            if (!incoming || xQueueSend(incoming, &message, 0) != pdTRUE) { delete message; inputFault = true; }
+            incomingBytes.fetch_add(message->size());
+            if (!incoming || xQueueSend(incoming, &message, 0) != pdTRUE) {
+                incomingBytes.fetch_sub(message->size());delete message; inputFault = true;
+            }
         } else inputFault = true;
         frame.clear(); frameExpected = 0;
     }
@@ -235,47 +372,72 @@ void MvtWssGateway::disconnectWs() {
     socketConnected = false; authenticated = false; authSent = false;
     connecting = false; lastServerAckMs = 0;
     snapshot.clear();
+    std::vector<uint32_t>().swap(snapshotNodes);
     if (!transport.active()) finishDisconnect();
 }
 void MvtWssGateway::finishDisconnect() {
     // Receiver has joined: releasing its frame is now safe without waiting.
-    std::string().swap(frame); frameExpected = 0; inputFault = false;
+    MvtWssRxBuffer().swap(frame); frameExpected = 0; inputFault = false;
     socketConnected = false; authenticated = false; authSent = false;
     connectionEnded = false; peerRejected = false;
-    std::string *p;
+    MvtWssRxBuffer *p;
     while (incoming && xQueueReceive(incoming, &p, 0) == pdTRUE) delete p;
+    incomingBytes.store(0); // producer has joined before this drain
     retiring = false;
     if (retirementNeedsDelay) lastConnectAttemptMs = millis();
     retirementNeedsDelay = false;
+#if MVT_WSS_STRESS_TEST
+    stressSample("retired");stressIdleAt=millis();stressIdlePending=true;
+#endif
 }
 void MvtWssGateway::connectWs() {
     if (transport.active()) { disconnectWs(); return; }
     if (mvtOtaUpdater.workerRunning()) return;
     LOG_INFO("MVT WSS connect heap=%u largest=%u",ESP.getFreeHeap(),ESP.getMaxAllocHeap());
+#if MVT_WSS_STRESS_TEST
+    stressSample("preconnect");
+#endif
     std::string url = configuredAddress.empty() ? "wss://movetain.app/ws" : configuredAddress;
     if (url.find("://") == std::string::npos) url = "wss://" + url;
     size_t hostEnd = url.find('/', url.find("://") + 3);
     if (hostEnd == std::string::npos) url += "/ws";
     // Relay keys must never be sent in cleartext.
     if (url.compare(0, 6, "wss://") != 0) { authBlocked = true; displayError = "BADURL"; LOG_WARN("MVT requires wss://"); return; }
+#if MVT_WSS_STRESS_TEST
+    if(mvtStressBefore(millis(),stressBadTargetUntil))url="wss://127.0.0.1:1/ws";
+#endif
     if (!transport.start(url, MVT_ROOT_CA, configurationEpoch)) return;
     connecting = true; connectStartedMs = millis(); connectionEnded = false;
 }
 bool MvtWssGateway::sendDocument(cJSON *p) {
-    std::string text = serialize(p);
-    if (!socketConnected || retiring || inputFault || text.empty()) return false;
-    const std::string type = str(p, "type");
-    const bool priority = type == "AUTH_GATEWAY" || type == "GATEWAY_HEARTBEAT";
+    mvtStressMemoryMark(7);
+    if (!p || !socketConnected || retiring || inputFault) return false;
+    const char *type = str(p, "type");
+    const bool priority = !strcmp(type,"AUTH_GATEWAY") || !strcmp(type,"GATEWAY_HEARTBEAT");
+    if(!transport.canSend(priority))return false;
+    // cJSON reports allocation failure with nullptr. Avoid converting its
+    // buffer into a second, throwing std::string before the bounded TX queue.
+    std::unique_ptr<char,decltype(&cJSON_free)> text(cJSON_PrintUnformatted(p),cJSON_free);
+    if (!text || !*text) return false;
+    mvtStressMemoryMark(8,strlen(text.get()));
     // Regenerate node state/snapshots after reconnect; replay unsent application
     // events only within the same room/configuration epoch.
-    const bool replay = !priority && type != "NODE_UPDATE" && !cJSON_IsTrue(get(p, "snapshot"));
-    return transport.send(text, priority, replay);
+    const bool replay = !priority && strcmp(type,"NODE_UPDATE") && !cJSON_IsTrue(get(p, "snapshot"));
+    if(!transport.sendOwned(text.get(),strlen(text.get()),cJSON_free,priority,replay))return false;
+    text.release(); // accepted queue owns the existing JSON buffer, no second copy
+    return true;
 }
 void MvtWssGateway::publish(cJSON *p) {
     auto owned = json(p);
-    std::string text = serialize(p);
+    bufferEvent(serialize(p));
+}
+void MvtWssGateway::bufferEvent(std::string text) {
     if (text.empty()) return;
-    if (outgoing.size() == MAX_EVENTS) {
+    const size_t budget=16384,cost=text.capacity()+1;
+    if(cost>budget){LOG_WARN("MVT offline event exceeds buffer budget; dropped");return;}
+    size_t used=0;for(const auto &item:outgoing)used+=item.capacity()+1;
+    while (!outgoing.empty()&&(outgoing.size()>=MAX_EVENTS||used+cost>budget)) {
+        used-=outgoing.front().capacity()+1;
         outgoing.pop_front(); LOG_WARN("MVT offline event buffer full; oldest event dropped");
     }
     outgoing.push_back(std::move(text));
@@ -289,6 +451,7 @@ const char *MvtWssGateway::radioPresetName() const {
 cJSON *MvtWssGateway::gatewayInfo() {
     uint32_t id = nodeDB->getNodeNum();
     cJSON *p = nodeDocument(id);
+    if(!p)return nullptr;
     setString(p, "nodeName", owner.long_name[0] ? owner.long_name : owner.short_name);
     setString(p, "longName", owner.long_name);
     setString(p, "shortName", owner.short_name);
@@ -296,9 +459,9 @@ cJSON *MvtWssGateway::gatewayInfo() {
     cJSON_AddBoolToObject(p, "pkiPrivateChat", true);
     cJSON_AddBoolToObject(p, "recipientKeyRecovery", true);
     cJSON_AddBoolToObject(p, "pkiPrivateWaypoints", true);
-    if (auto *diag = mvtWssDiagnosticJson()) cJSON_AddItemToObject(p, "lastDisconnectDiag", diag);
-    if (auto *diag = mvtWssDiagnosticJson(true)) cJSON_AddItemToObject(p, "lastAttemptDiag", diag);
-    if (auto *boot = mvtWssBootJson()) cJSON_AddItemToObject(p, "bootDiagnostic", boot);
+    if (auto *diag = mvtWssDiagnosticJson(false,true)) addOwnedItem(p, "lastDisconnectDiag", diag);
+    if (auto *diag = mvtWssDiagnosticJson(true,true)) addOwnedItem(p, "lastAttemptDiag", diag);
+    if (auto *boot = mvtWssBootJson(true)) addOwnedItem(p, "bootDiagnostic", boot);
     auto *radio = RadioLibInterface::instance;
     if (radio && radio->getFreq() > 0) {
         char frequency[24]; snprintf(frequency, sizeof(frequency), "%.3f MHz", double(radio->getFreq()));
@@ -327,22 +490,30 @@ cJSON *MvtWssGateway::gatewayInfo() {
     return p;
 }
 void MvtWssGateway::sendAuthGateway() {
+    mvtStressMemoryMark(1);
+    if(!transport.canSend(true))return;
     auto p = json(event("AUTH_GATEWAY"));
+    if(!p)return;
     cJSON_AddStringToObject(p.get(), "room", configuredRoom.c_str());
     cJSON_AddStringToObject(p.get(), "relayKey", configuredKey.c_str());
-    cJSON_AddItemToObject(p.get(), "gatewayInfo", gatewayInfo());
+    if(!addOwnedItem(p.get(), "gatewayInfo", gatewayInfo()))return;
+    mvtStressMemoryMark(2);
     authSent = sendDocument(p.get()); authStartedMs = millis();
 }
 void MvtWssGateway::sendHeartbeat() {
+    mvtStressMemoryMark(3);
+    if(!transport.canSend(true))return;
     auto p = json(event("GATEWAY_HEARTBEAT"));
+    if(!p)return;
     cJSON_AddNumberToObject(p.get(), "timestamp", double(nowMs()));
-    cJSON_AddItemToObject(p.get(), "gatewayInfo", gatewayInfo());
+    if(!addOwnedItem(p.get(), "gatewayInfo", gatewayInfo()))return;
+    mvtStressMemoryMark(4);
     if (sendDocument(p.get())) lastHeartbeatMs = millis();
 }
 cJSON *MvtWssGateway::nodeDocument(uint32_t id, bool mv) {
     std::string k = key(id, mv);
     auto found = nodes.find(k);
-    cJSON *p = found == nodes.end() ? cJSON_CreateObject() : cJSON_Parse(found->second.c_str());
+    cJSON *p = found == nodes.end() ? cJSON_CreateObject() : cJSON_Parse(found->second.document.c_str());
     if (!p) p = cJSON_CreateObject();
     setString(p, "nodeKey", k.c_str()); setNumber(p, "nodeId", id); setString(p, "nodeHex", hex(id).c_str());
     auto *n = nodeDB->getMeshNode(id);
@@ -365,41 +536,74 @@ cJSON *MvtWssGateway::nodeDocument(uint32_t id, bool mv) {
     if (!get(p, "callsign")) setString(p, "callsign", hex(id).c_str());
     return p;
 }
+size_t MvtWssGateway::nodeCacheBytes() const {
+    // Conservative RAM accounting, including tree links, string capacities,
+    // alignment and allocation bookkeeping; SSO strings are counted as well.
+    size_t bytes=0;
+    for(const auto &n:nodes)
+        bytes+=sizeof(decltype(nodes)::value_type)+4*sizeof(void*)+48+n.first.capacity()+1+n.second.document.capacity()+1;
+    return bytes;
+}
+void MvtWssGateway::cacheNode(const std::string &k,const cJSON *p) {
+    if(!p)return;
+    std::string text=serialize(p);
+    if(text.empty())return;
+    const size_t cost=sizeof(decltype(nodes)::value_type)+4*sizeof(void*)+48+k.capacity()+1+text.capacity()+1;
+    nodes.erase(k);
+    if(cost>NODE_CACHE_BUDGET)return; // live update can still be sent below
+    const std::string own=key(nodeDB->getNodeNum());
+    while(!nodes.empty()&&(nodes.size()>=MAX_NODES||nodeCacheBytes()+cost>NODE_CACHE_BUDGET)){
+        auto victim=nodes.end();
+        for(auto it=nodes.begin();it!=nodes.end();++it){
+            if(it->first==own)continue; // retain local environmental telemetry
+            if(victim==nodes.end()||it->second.updated<victim->second.updated)victim=it;
+        }
+        if(victim==nodes.end())return;
+        nodes.erase(victim); // no JSON parsing/allocation during eviction
+    }
+    CachedNode item;item.document=std::move(text);item.updated=number(p,"lastUpdateMs");
+    nodes.emplace(k,std::move(item));
+}
 void MvtWssGateway::publishNode(cJSON *p) {
+    mvtStressMemoryMark(15);
     auto owned = json(p);
     std::string k = str(p, "nodeKey");
-    if (nodes.size() >= MAX_NODES && !nodes.count(k)) {
-        // Cache only virtual nodes; standard nodes can be rebuilt from NodeDB.
-        auto victim = std::min_element(nodes.begin(), nodes.end(), [](const std::pair<const std::string, std::string> &a,
-                                                                    const std::pair<const std::string, std::string> &b) {
-            auto ja = json(cJSON_Parse(a.second.c_str())), jb = json(cJSON_Parse(b.second.c_str()));
-            return number(ja.get(), "lastUpdateMs") < number(jb.get(), "lastUpdateMs");
-        });
-        if (victim != nodes.end()) nodes.erase(victim);
-    }
-    nodes[k] = serialize(p);
+    cacheNode(k,p);
+    mvtStressMemoryMark(16,nodeCacheBytes());
     if (!authenticated || !nowMs()) return; // Reconnect snapshot contains latest state.
     auto e = json(event("NODE_UPDATE"));
     cJSON_AddStringToObject(e.get(), "nodeKey", k.c_str());
-    cJSON_AddItemToObject(e.get(), "node", owned.release());
+    addOwnedItem(e.get(), "node", owned.release());
     if (!sendDocument(e.get())) snapshotPending = true;
 }
 void MvtWssGateway::publishWaypoint(cJSON *p) {
     auto owned = json(p);
     std::string id = std::to_string(number(p, "latitude")) + ":" + std::to_string(number(p, "longitude")) + ":" + str(p, "title") + ":" + std::to_string(number(p, "timestampSec"));
-    if (waypoints.size() >= 64) waypoints.erase(waypoints.begin());
-    waypoints[id] = serialize(p);
-    auto e = event("WAYPOINT"); cJSON_AddItemToObject(e, "waypoint", owned.release()); publish(e);
+    std::string document=serialize(p);
+    const size_t overhead=sizeof(decltype(waypoints)::value_type)+64;
+    const size_t cost=id.capacity()+document.capacity()+2+overhead;
+    waypoints.erase(id);
+    if(!document.empty()&&cost<=8192){
+        size_t used=0;for(const auto &w:waypoints)used+=w.first.capacity()+w.second.capacity()+2+overhead;
+        while(!waypoints.empty()&&(waypoints.size()>=64||used+cost>8192)){
+            const auto &w=*waypoints.begin();used-=w.first.capacity()+w.second.capacity()+2+overhead;
+            waypoints.erase(waypoints.begin());
+        }
+        waypoints.emplace(std::move(id),std::move(document));
+    }
+    auto e = event("WAYPOINT"); addOwnedItem(e, "waypoint", owned.release()); publish(e);
 }
 void MvtWssGateway::sendSnapshot() {
+    mvtStressMemoryMark(5);
+    if(!transport.canSend(false))return;
     // Send updates individually to avoid a large heap allocation and avoid
     // deleting portal nodes when the gateway's bounded cache is incomplete.
-    if (snapshot.empty()) {
+    if (snapshot.empty()&&snapshotNodes.empty()) {
     LOG_INFO("MVT snapshot NodeDB entries=%u", unsigned(nodeDB->getNumMeshNodes()));
     for (size_t i = 0; i < nodeDB->getNumMeshNodes(); ++i) {
         auto *n = nodeDB->getMeshNodeByIndex(i);
         if (n->num == nodeDB->getNodeNum() || n->is_ignored) continue;
-        snapshot.push_back("N" + key(n->num));
+        snapshotNodes.push_back(n->num);
     }
     for (const auto &n : nodes) {
         if (n.first == key(nodeDB->getNodeNum())) continue;
@@ -411,24 +615,31 @@ void MvtWssGateway::sendSnapshot() {
     }
     }
     // At most one snapshot item per turn so LoRa processing stays responsive.
-    if (!snapshot.empty()) {
-        const std::string &item = snapshot.front();
-        auto e = json(event(item[0] == 'W' ? "WAYPOINT" : "NODE_UPDATE"));
+    if (!snapshot.empty()||!snapshotNodes.empty()) {
+        const bool fromDatabase=!snapshotNodes.empty();
+        const std::string item=fromDatabase?std::string():snapshot.front();
+        auto e = json(event(!fromDatabase&&item[0] == 'W' ? "WAYPOINT" : "NODE_UPDATE"));
         cJSON_AddBoolToObject(e.get(), "snapshot", true);
-        if (item[0] == 'N')
-            cJSON_AddItemToObject(e.get(), "node", nodeDocument(strtoul(item.c_str() + 2, nullptr, 16)));
+        if(fromDatabase)addOwnedItem(e.get(),"node",nodeDocument(snapshotNodes.front()));
+        else if (item[0] == 'N')
+            addOwnedItem(e.get(), "node", nodeDocument(strtoul(item.c_str() + 2, nullptr, 16)));
         else {
-            const auto &cache = item[0] == 'W' ? waypoints : nodes;
-            auto found = cache.find(item.substr(1));
-            if (found == cache.end()) { snapshot.pop_front(); return; }
-            cJSON_AddItemToObject(e.get(), item[0] == 'W' ? "waypoint" : "node", cJSON_Parse(found->second.c_str()));
+            const std::string *cached=nullptr;
+            if(item[0]=='W'){auto found=waypoints.find(item.substr(1));if(found!=waypoints.end())cached=&found->second;}
+            else {auto found=nodes.find(item.substr(1));if(found!=nodes.end())cached=&found->second.document;}
+            if (!cached) { snapshot.pop_front(); return; }
+            addOwnedItem(e.get(), item[0] == 'W' ? "waypoint" : "node", cJSON_Parse(cached->c_str()));
         }
         cJSON *n = cJSON_GetObjectItemCaseSensitive(e.get(), "node");
         // A NodeDB snapshot is historical, not evidence of a fresh RF reply.
         if (n && !get(n, "lastUpdateMs")) setNumber(n, "lastUpdateMs", 0);
-        if (sendDocument(e.get())) snapshot.pop_front();
+        mvtStressMemoryMark(6);
+        if (sendDocument(e.get())) {
+            if(fromDatabase)snapshotNodes.erase(snapshotNodes.begin());else snapshot.pop_front();
+        }
     }
-    snapshotPending = !snapshot.empty();
+    snapshotPending = !snapshot.empty()||!snapshotNodes.empty();
+    if(!snapshotPending)std::vector<uint32_t>().swap(snapshotNodes);
 }
 void MvtWssGateway::status(uint32_t id, const char *value, const char *encryption, const char *errorCode) {
     if (!id) return;
@@ -641,7 +852,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
             environmentMetrics(n.get(), telemetry.variant.environment_metrics);
         if (telemetry.which_variant == meshtastic_Telemetry_air_quality_metrics_tag)
             airMetrics(n.get(), telemetry.variant.air_quality_metrics);
-        nodes[key(from)] = serialize(n.get());
+        cacheNode(key(from),n.get());
         if (authenticated) sendHeartbeat();
     }
     if (local || mp.decoded.want_response) return ProcessMessage::CONTINUE;
@@ -692,9 +903,9 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
                 cJSON_AddNumberToObject(wp, "altitude", mv.altitude); cJSON_AddNumberToObject(wp, "timestampSec", double(nowMs() / 1000));
                 cJSON_AddBoolToObject(wp, "isRadio", true); cJSON_AddBoolToObject(wp, "isTarget", mv.icon == 5);
                 cJSON_AddBoolToObject(wp, "isSos", sos);
-                publishWaypoint(cJSON_Duplicate(wp, true)); cJSON_AddItemToObject(msg, "waypoint", wp);
+                publishWaypoint(cJSON_Duplicate(wp, true)); addOwnedItem(msg, "waypoint", wp);
             }
-            auto e = event("CHAT_MESSAGE"); cJSON_AddItemToObject(e, "message", msg); publish(e);
+            auto e = event("CHAT_MESSAGE"); addOwnedItem(e, "message", msg); publish(e);
         }
     } else if (mp.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP) {
         auto msg = cJSON_CreateObject();
@@ -705,7 +916,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
         cJSON_AddStringToObject(msg, "text", text.c_str()); cJSON_AddNumberToObject(msg, "timestampMs", double(nowMs()));
         cJSON_AddBoolToObject(msg, "isSos", false); cJSON_AddStringToObject(msg, "status", "RECEIVED");
         cJSON_AddNumberToObject(msg, "hops", hops);
-        auto e = event("CHAT_MESSAGE"); cJSON_AddItemToObject(e, "message", msg); publish(e);
+        auto e = event("CHAT_MESSAGE"); addOwnedItem(e, "message", msg); publish(e);
     } else if (mp.decoded.portnum == meshtastic_PortNum_POSITION_APP) {
         meshtastic_Position p = meshtastic_Position_init_default;
         if (decodeProto(mp, &meshtastic_Position_msg, &p)) {
@@ -745,9 +956,11 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
 }
 
 void MvtWssGateway::handleIncomingCommand(const char *text) {
+    mvtStressMemoryMark(10,text?strlen(text):0);
     // Require a complete single JSON document, including no trailing garbage.
     const char *end = nullptr;
     auto j = json(cJSON_ParseWithOpts(text, &end, true));
+    mvtStressMemoryMark(11);
     if (!j || !cJSON_IsObject(j.get())) { LOG_WARN("MVT rejected malformed JSON"); return; }
     const std::string type = str(j.get(), "type");
     if (type == "ERROR") {
@@ -773,6 +986,10 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         if (!authSent) return;
         authenticated = true; displayError = nullptr; retryDelayMs = 15000; snapshotPending = true; lastServerAckMs = millis();
         LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0;
+#if MVT_WSS_STRESS_TEST
+        stressSample("authenticated");
+        mvtStressNetSnapshot(true);
+#endif
         // The ACK provides server time even on devices without GPS/NTP.
         sendHeartbeat();if(mvtOtaUpdater.hasStatus())publish(mvtOtaUpdater.status(nodeDB->getNodeNum()));return;
     }
@@ -1151,6 +1368,9 @@ void MvtWssGateway::advancePolls() {
     }
 }
 int32_t MvtWssGateway::runOnce() {
+#if MVT_WSS_STRESS_TEST
+    stressTick();
+#endif
     const int wifiStatus = int(WiFi.status());
     if (wifiStatus != lastWifiStatus) {
         LOG_WARN("MVT WSS wifi old=%d new=%d uptime=%u", lastWifiStatus, wifiStatus, unsigned(millis()));
@@ -1172,8 +1392,7 @@ int32_t MvtWssGateway::runOnce() {
     std::string failed; uint32_t failedEpoch;
     while (transport.takeFailed(failed, failedEpoch)) {
         if (failedEpoch == configurationEpoch) {
-            if (outgoing.size() == MAX_EVENTS) outgoing.pop_front();
-            outgoing.push_back(std::move(failed));
+            bufferEvent(std::move(failed));
         }
     }
     if (retiring) {
@@ -1200,11 +1419,12 @@ int32_t MvtWssGateway::runOnce() {
     // A server ERROR can arrive immediately before a close event. Process it
     // before reconnect logic, so replacement/admin rejection cannot loop.
     advanceAirPolls();advancePolls();advanceSingles();
-    std::string *text = nullptr;
+    MvtWssRxBuffer *text = nullptr;
     for (int i = 0; i < 8 && incoming && xQueueReceive(incoming, &text, 0) == pdTRUE; ++i) {
+        incomingBytes.fetch_sub(text->size());
         // The consumer owns this string even if a command retires the socket
         // and drains the rest of the queue.
-        std::unique_ptr<std::string> message(text);
+        std::unique_ptr<MvtWssRxBuffer> message(text);
         handleIncomingCommand(message->c_str());
         if (retiring) break;
     }
@@ -1240,7 +1460,8 @@ int32_t MvtWssGateway::runOnce() {
         MvtWssDiagnostic diagnostic{};
         if (mvt_wss_latest_diagnostic(&diagnostic)) networkRecovery.observe(diagnostic, millis());
         // Transport is joined and the OTA worker has released crypto/flash.
-        // Rejoin once per outage, only after sustained pre-session DNS/TCP failure.
+        // At most two rejoins per outage, ten minutes apart, only after
+        // sustained pre-session DNS/TCP failure. No board reboot.
         if (!mvtOtaUpdater.active() && networkRecovery.due(millis())) {
             if (requestWifiReconnect()) {
                 networkRecovery.recovered(millis());
@@ -1271,6 +1492,7 @@ int32_t MvtWssGateway::runOnce() {
     advancePolls();
     if (snapshotPending) sendSnapshot();
     for (int i = 0; i < 4 && !outgoing.empty(); ++i) {
+        if(!transport.canSend(false))break;
         auto p = json(cJSON_Parse(outgoing.front().c_str()));
         // Events captured before time sync get receive time, not 1970.
         cJSON *m = cJSON_GetObjectItemCaseSensitive(p.get(), "message");

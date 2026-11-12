@@ -17,6 +17,10 @@ TestEsp ESP;
 TestNodeDB db;
 TestNodeDB *nodeDB=&db;
 static const esp_partition_t running{0x330000},target{0x330000};
+static const esp_partition_t smallTarget{0x100000};
+static const esp_partition_t *nextPartition=&target;
+static bool partitionLookupForbidden=false;
+static unsigned partitionLookups=0;
 static void (*task)(void *)=nullptr;
 static void *taskContext=nullptr;
 static uint32_t clockMs=0;
@@ -53,7 +57,11 @@ int xQueueReceive(QueueHandle_t,void *p,unsigned){
     mvtOtaUpdater.onDisconnect();
     assert(queue.full);memcpy(p,queue.data.data(),queue.size);queue.full=false;return pdPASS;
 }
-const esp_partition_t *esp_ota_get_next_update_partition(const void *){return &target;}
+const esp_partition_t *esp_ota_get_next_update_partition(const void *){
+    // ESP-IDF's iterator allocates: under exhausted heap it can dereference
+    // nullptr. No capability heartbeat or worker may repeat this boot lookup.
+    assert(!partitionLookupForbidden);++partitionLookups;return nextPartition;
+}
 const esp_partition_t *esp_ota_get_running_partition(){return &running;}
 int esp_ota_get_state_partition(const esp_partition_t *,int *state){*state=2;return ESP_OK;}
 int esp_ota_begin(const esp_partition_t *p,size_t,esp_ota_handle_t *h){assert(p==&target);++opens;*h=1;return ESP_OK;}
@@ -91,6 +99,21 @@ static cJSON *command(){
 }
 int main(){
     mvtOtaUpdater.begin();
+    partitionLookupForbidden=true;
+    for(int i=0;i<1000;++i)assert(mvtOtaUpdater.supported());
+    assert(partitionLookups==1);
+    partitionLookupForbidden=false;
+    for(auto *candidate : {static_cast<const esp_partition_t *>(nullptr),&running,&smallTarget}){
+        nextPartition=candidate;
+        MvtOtaUpdater unavailable;
+        assert(!unavailable.supported());
+        unavailable.begin();
+        partitionLookupForbidden=true;
+        assert(!unavailable.supported());
+        partitionLookupForbidden=false;
+    }
+    nextPartition=&target;
+    partitionLookupForbidden=true;
     for(int scenario : {7,0,1,2,3,4,5,6}){
         mode=scenario;
         receives=opens=aborts=writes=boots=cryptoLive=shaLive=deletes=0;

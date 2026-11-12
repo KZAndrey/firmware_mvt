@@ -24,5 +24,15 @@ int main(){
  MvtWssNetworkRecovery wrap;const uint32_t start=UINT32_MAX-60000;
  wrap.observe(failure(1),start);wrap.observe(failure(2),start+60000u);wrap.observe(failure(3),start+120000u);
  assert(wrap.due(start+120000u));
+ // A failed first rejoin must not disable recovery forever. Require fresh
+ // failures, the full cooldown and a hard bound of two attempts per outage.
+ MvtWssNetworkRecovery retry;
+ for(unsigned n=1;n<=3;++n)retry.observe(failure(n),n*60000);
+ assert(retry.due(180000));retry.recovered(180000);
+ for(unsigned n=4;n<=6;++n)retry.observe(failure(n),n*60000);
+ assert(!retry.due(779999));assert(retry.due(780000));
+ retry.recovered(780000);
+ for(unsigned n=7;n<=9;++n)retry.observe(failure(n),n*120000);
+ assert(!retry.due(2000000));
  puts("WiFi recovery: unique network failures, delay, once per outage, cooldown, healthy reset, non-network exclusions, uptime wrap: PASS");
 }

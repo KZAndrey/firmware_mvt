@@ -1,5 +1,6 @@
 #pragma once
 #include "esp_websocket_client.h"
+extern bool testAdmissionFull;
 // Deterministic adapter for gateway protocol tests. The real asynchronous
 // worker is exercised separately by transport_worker_test.cpp.
 class MvtWssTransport {
@@ -16,6 +17,12 @@ public:
     void shutdown(){stop();}
     bool active() const{return client;}
     bool connected() const{return client&&!testSendFailure;}
+    bool canSend(bool) const{return connected()&&!testAdmissionFull;}
     bool send(const std::string &s,bool,bool){return client&&esp_websocket_client_send_text(client,s.c_str(),s.size(),1000)==int(s.size());}
+    bool send(const char *s,size_t length,bool,bool){return client&&esp_websocket_client_send_text(client,s,length,1000)==int(length);}
+    bool sendOwned(char *s,size_t length,void (*dispose)(void *),bool priority,bool replay){
+        if(!dispose||!send(s,length,priority,replay))return false;
+        dispose(s);return true;
+    }
     bool takeFailed(std::string &,uint32_t &){return false;}
 };

@@ -17,14 +17,15 @@ public:
         if (failures < 3) ++failures;
     }
     bool due(uint32_t now) const {
-        return failures >= 3 && !usedThisOutage && uint32_t(now-firstFailure) >= 120000 &&
+        return failures >= 3 && attemptsThisOutage < 2 && uint32_t(now-firstFailure) >= 120000 &&
             (!hasRecovered || uint32_t(now-lastRecovery) >= 600000);
     }
-    void recovered(uint32_t now) { usedThisOutage=true; hasRecovered=true; lastRecovery=now; clear(); }
+    void recovered(uint32_t now) { ++attemptsThisOutage; hasRecovered=true; lastRecovery=now; clear(); }
     void clear() { failures=0; firstFailure=0; }
-    void healthy() { clear(); usedThisOutage=false; }
+    void healthy() { clear(); attemptsThisOutage=0; }
 private:
     uint32_t seen=0, firstFailure=0, lastRecovery=0;
     unsigned failures=0;
-    bool usedThisOutage=false, hasRecovered=false;
+    unsigned attemptsThisOutage=0;
+    bool hasRecovered=false;
 };

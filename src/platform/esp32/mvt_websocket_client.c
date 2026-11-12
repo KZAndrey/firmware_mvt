@@ -44,14 +44,29 @@
 static const char *TAG = "WEBSOCKET_CLIENT";
 
 // One gateway WebSocket task. Observe failed allocations without allocating,
-// logging, or taking heap locks inside the allocator's failure hook.
+// logging in the allocator's failure hook. USB-test tracing may read heap
+// statistics after the allocator has released its lock (pinned IDF 4.4.7).
 static TaskHandle_t mvt_alloc_task;
 static uint32_t mvt_alloc_size, mvt_alloc_caps, mvt_alloc_count;
 static bool mvt_alloc_hook_registered;
+#if MVT_WSS_STRESS_TEST
+#include "esp_debug_helpers.h"
+#include "mvt_stress_allocations.inc"
+#include "mvt_stress_wifi_trace.inc"
+extern void mvt_stress_memory_freeze(uint32_t uptime);
+#endif
 static void mvt_alloc_failed(size_t size, uint32_t caps, const char *function_name)
 {
     (void)function_name;
-    if (xPortInIsrContext() || xTaskGetCurrentTaskHandle() != __atomic_load_n(&mvt_alloc_task, __ATOMIC_RELAXED)) return;
+    if (xPortInIsrContext()) return;
+    const bool wss = xTaskGetCurrentTaskHandle() == __atomic_load_n(&mvt_alloc_task, __ATOMIC_RELAXED);
+#if MVT_WSS_STRESS_TEST
+    mvt_stress_record_alloc((uint32_t)size,caps,pcTaskGetName(NULL),wss,(uint32_t)(xTaskGetTickCount()*portTICK_PERIOD_MS));
+    mvt_stress_capture_wifi_trace((uint32_t)size,caps,pcTaskGetName(NULL),(uint32_t)(xTaskGetTickCount()*portTICK_PERIOD_MS));
+    if ((caps & MALLOC_CAP_DMA) && !strncmp(pcTaskGetName(NULL),"wifi",4))
+        mvt_stress_memory_freeze((uint32_t)(xTaskGetTickCount()*portTICK_PERIOD_MS));
+#endif
+    if (!wss) return;
     __atomic_store_n(&mvt_alloc_size, (uint32_t)size, __ATOMIC_RELAXED);
     __atomic_store_n(&mvt_alloc_caps, caps, __ATOMIC_RELAXED);
     __atomic_add_fetch(&mvt_alloc_count, 1, __ATOMIC_RELAXED);

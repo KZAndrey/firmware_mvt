@@ -5,6 +5,7 @@
 #include "concurrency/OSThread.h"
 #include "platform/esp32/MvtWssTransport.h"
 #include "MvtWssNetworkRecovery.h"
+#include "MvtWssRxBuffer.h"
 #include <atomic>
 #include <WiFi.h>
 #include <cJSON.h>
@@ -12,6 +13,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -31,6 +33,14 @@ public:
 protected:
     int32_t runOnce() override;
 private:
+#if MVT_WSS_STRESS_TEST
+    void stressTick();
+    void stressSample(const char *phase);
+    uint32_t stressCycle=0, stressBadTargetUntil=0, stressIdleAt=0;
+    bool stressWifiHeld=false, stressIdlePending=false, stressHalted=false;
+    bool stressRadioPending=false;
+    bool stressRejoinPending=false;
+#endif
     struct Pending {
         Pending() = default;
         Pending(uint32_t packet, uint32_t node, uint32_t tick, const std::string &type,
@@ -86,12 +96,20 @@ private:
     uint32_t lastConnectAttemptMs = 0, authStartedMs = 0;
     uint64_t serverTimeMs = 0;
     uint32_t serverTimeTick = 0;
-    std::string frame, configuredRoom, configuredKey, configuredAddress;
+    MvtWssRxBuffer frame;
+    std::string configuredRoom, configuredKey, configuredAddress;
     size_t frameExpected = 0;
+    std::atomic<size_t> incomingBytes{0};
     std::deque<std::string> outgoing;
+    void bufferEvent(std::string);
     std::deque<std::string> snapshot;
+    std::vector<uint32_t> snapshotNodes;
     std::deque<Pending> pending;
-    std::map<std::string, std::string> nodes, waypoints;
+    struct CachedNode { std::string document; double updated=0; };
+    std::map<std::string, CachedNode> nodes;
+    std::map<std::string, std::string> waypoints;
+    size_t nodeCacheBytes() const;
+    void cacheNode(const std::string &, const cJSON *);
     std::deque<uint64_t> seenPackets;
     std::deque<uint32_t> completedCommands;
     void connectWs();

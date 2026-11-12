@@ -37,11 +37,19 @@ bool MvtOtaUpdater::supported() const {
 #if !CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
     return false;
 #else
-    auto *p=esp_ota_get_next_update_partition(nullptr);
-    return p&&p!=esp_ota_get_running_partition()&&p->size>=0x1c0000;
+    return updatePartition!=nullptr;
 #endif
 }
 void MvtOtaUpdater::begin(){
+    // Partition descriptors and the running slot are stable until reboot.
+    // Resolve before WSS/TLS pressure: IDF's partition iterator allocates,
+    // so querying it on every heartbeat is unsafe when the heap is exhausted.
+    updatePartition=nullptr;
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    const auto *candidate=esp_ota_get_next_update_partition(nullptr);
+    if(candidate&&candidate!=esp_ota_get_running_partition()&&candidate->size>=0x1c0000)
+        updatePartition=candidate;
+#endif
     LOG_INFO("MVT OTA image %s",imageMarker);
     Preferences prefs;if(prefs.begin("mvt-ota",true)){
         jobId=prefs.getString("job","").c_str();releaseId=prefs.getString("release","").c_str();
@@ -147,7 +155,7 @@ void MvtOtaUpdater::run(){
       mbedtls_pk_verify(&pk,MBEDTLS_MD_SHA256,digest,32,sig,sigLen)==0;
     mbedtls_pk_free(&pk);if(!verified){fail("BAD_SIGNATURE");return;}
     if(cancelRequested){fail("WSS_DISCONNECTED");return;}
-    const esp_partition_t *target=esp_ota_get_next_update_partition(nullptr);
+    const esp_partition_t *target=updatePartition;
     if(!target||bytes>target->size){fail("PARTITION_SIZE");return;}
     esp_ota_handle_t ota=0;bool opened=false;const char *why=nullptr;
     do{

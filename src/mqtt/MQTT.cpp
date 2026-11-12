@@ -471,6 +471,7 @@ bool MQTT::publish(const char *topic, const char *payload, bool retained)
 {
     if (moduleConfig.mqtt.proxy_to_client_enabled) {
         meshtastic_MqttClientProxyMessage *msg = mqttClientProxyMessagePool.allocZeroed();
+        if (!msg) return false;
         msg->which_payload_variant = meshtastic_MqttClientProxyMessage_text_tag;
         strcpy(msg->topic, topic);
         strcpy(msg->payload_variant.text, payload);
@@ -490,6 +491,7 @@ bool MQTT::publish(const char *topic, const uint8_t *payload, size_t length, boo
 {
     if (moduleConfig.mqtt.proxy_to_client_enabled) {
         meshtastic_MqttClientProxyMessage *msg = mqttClientProxyMessagePool.allocZeroed();
+        if (!msg) return false;
         msg->which_payload_variant = meshtastic_MqttClientProxyMessage_data_tag;
         strlcpy(msg->topic, topic, sizeof(msg->topic));
         if (length > sizeof(msg->payload_variant.data.bytes))
