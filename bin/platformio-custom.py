@@ -110,6 +110,12 @@ prefsLoc = projenv["PROJECT_DIR"] + "/version.properties"
 verObj = readProps(prefsLoc)
 if env.get("PIOENV") == "heltec-v3":
     verObj["long"] = "2.7.15.1211"
+    # Optional local USB diagnostic suffix; production builds keep the release version.
+    diagnostic_suffix = os.environ.get("MVT_DIAGNOSTIC_SUFFIX", "")
+    if diagnostic_suffix:
+        if not diagnostic_suffix.isalnum() or len(diagnostic_suffix) > 12:
+            raise ValueError("Invalid diagnostic version suffix")
+        verObj["long"] += "." + diagnostic_suffix
     verObj["short"] = "2.7.15"
     generation = int(os.environ.get("MVT_OTA_GENERATION", "38"))
     if generation < 0 or generation > 2147483647:

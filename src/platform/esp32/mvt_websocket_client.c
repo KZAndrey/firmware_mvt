@@ -21,6 +21,7 @@
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "esp_random.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "MvtTlsMemory.h"
 #include "MvtTlsRead.h"
@@ -196,6 +197,9 @@ static void mvt_ws_diagnostic(esp_websocket_client_handle_t client, const char *
         MvtWssDiagnostic d = {0};
         snprintf(d.stage, sizeof(d.stage), "%s", stage);
         d.uptimeMs = (uint32_t)_tick_get_ms(); d.ret = result; d.error = saved_errno;
+        d.freeHeap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        d.largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        d.minimumHeap = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         d.socketError = socket_error; d.tlsError = tls_error; d.tlsCode = tls_code; d.tlsFlags = tls_flags;
         d.opcode = client->last_opcode; d.payload = client->payload_len; d.offset = client->payload_offset;
         d.duringSession = client->state == WEBSOCKET_STATE_CONNECTED || client->state == WEBSOCKET_STATE_CLOSING;

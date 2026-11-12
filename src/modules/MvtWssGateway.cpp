@@ -229,7 +229,7 @@ void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
 }
 void MvtWssGateway::disconnectWs() {
     mvtOtaUpdater.onDisconnect();
-    retirementNeedsDelay = retirementNeedsDelay || transport.active() || connecting || connectionEnded.load();
+    retirementNeedsDelay = retirementNeedsDelay || transport.active() || connecting || connectionEnded.load() || inputFault.load();
     transport.stop();
     retiring = true;
     socketConnected = false; authenticated = false; authSent = false;
@@ -297,6 +297,8 @@ cJSON *MvtWssGateway::gatewayInfo() {
     cJSON_AddBoolToObject(p, "recipientKeyRecovery", true);
     cJSON_AddBoolToObject(p, "pkiPrivateWaypoints", true);
     if (auto *diag = mvtWssDiagnosticJson()) cJSON_AddItemToObject(p, "lastDisconnectDiag", diag);
+    if (auto *diag = mvtWssDiagnosticJson(true)) cJSON_AddItemToObject(p, "lastAttemptDiag", diag);
+    if (auto *boot = mvtWssBootJson()) cJSON_AddItemToObject(p, "bootDiagnostic", boot);
     auto *radio = RadioLibInterface::instance;
     if (radio && radio->getFreq() > 0) {
         char frequency[24]; snprintf(frequency, sizeof(frequency), "%.3f MHz", double(radio->getFreq()));
@@ -1213,8 +1215,10 @@ int32_t MvtWssGateway::runOnce() {
     if(uint32_t(millis()-lastDiagnosticState)>=1000){sendDiagnosticStates();lastDiagnosticState=millis();
         if(mvtOtaUpdater.active()&&screen){screen->setOn(true);screen->forceDisplay();}}
     if (peerRejected) { authBlocked = true; if (!displayError) displayError = "BLOCK"; peerRejected = false; }
-    if (connectionEnded) { disconnectWs(); return 100; }
-    if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked || inputFault) {
+    // Retire frame faults even if the worker has already become idle. Only
+    // finishDisconnect may release receiver-owned buffers and clear the fault.
+    if (connectionEnded || inputFault) { disconnectWs(); return 100; }
+    if (!moduleConfig.mqtt.enabled || room.empty() || secret.empty() || WiFi.status() != WL_CONNECTED || authBlocked) {
         networkRecovery.clear();
         if (transport.active()) disconnectWs();
         if (!moduleConfig.mqtt.enabled) { authBlocked = false; displayError = nullptr; }

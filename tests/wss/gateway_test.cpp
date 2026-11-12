@@ -19,6 +19,9 @@ RadioLibInterface *RadioLibInterface::instance = &testRadioInfo;
 #include <cJSON.h>
 #include "platform/esp32/MvtWssDiagnostics.h"
 MvtWssDiagnostic testDiagnostic = {};
+bool mvt_wss_boot_diagnostic(MvtWssBootDiagnostic *out) {
+    *out = {17,3,0,2,0,0,0}; return true;
+}
 bool mvt_wss_last_diagnostic(MvtWssDiagnostic *out) { *out = testDiagnostic; return out->sequence != 0; }
 bool mvt_wss_latest_diagnostic(MvtWssDiagnostic *out) { *out = testDiagnostic; return out->sequence != 0; }
 #define private public
@@ -166,6 +169,10 @@ int main(int argc, char **argv) {
     CHECK(nget(cJSON_GetObjectItem(initialNode.get(), "node"), "lastUpdateMs") == 1700000000000ULL);
     auto gateway = Json(g.gatewayInfo(), cJSON_Delete);
     CHECK(!cJSON_GetObjectItem(gateway.get(), "lastDisconnectDiag"));
+    CHECK(!cJSON_GetObjectItem(gateway.get(), "lastAttemptDiag"));
+    auto *bootDiagnostic=cJSON_GetObjectItem(gateway.get(), "bootDiagnostic");
+    CHECK(nget(bootDiagnostic,"bootId")==17&&nget(bootDiagnostic,"resetReason")==3);
+    CHECK(nget(bootDiagnostic,"bootCount")==2&&nget(bootDiagnostic,"sleepIntent")==0);
     testDiagnostic.sequence=1;testDiagnostic.bootId=17;testDiagnostic.tlsError=32776;
     strcpy(testDiagnostic.stage,"read");
     auto diagnosticGateway = Json(g.gatewayInfo(), cJSON_Delete);
@@ -173,6 +180,8 @@ int main(int argc, char **argv) {
     CHECK(nget(diagnostic,"tlsError")==32776);
     CHECK(nget(diagnostic,"bootId")==17);
     CHECK(std::string(sget(diagnostic,"stage"))=="read");
+    CHECK(nget(cJSON_GetObjectItem(diagnosticGateway.get(),"lastAttemptDiag"),"sequence")==1);
+    CHECK(nget(diagnostic,"largestBlock")==0);
     testDiagnostic = {};
     CHECK(std::string(sget(gateway.get(), "nodeName")) == "Movetain Host");
     CHECK(std::string(sget(gateway.get(), "shortName")) == "MVT");
@@ -652,6 +661,44 @@ int main(int argc, char **argv) {
         reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
         testMillis+=75000;reconnect.runOnce();CHECK(reconnect.transport.client==nullptr);CHECK(!reconnect.authenticated);
         testMillis+=15001;reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
+    }
+    // A latched frame fault with an already idle receiver must be retired.
+    {
+        MvtWssGateway fault;
+        fault.configuredRoom=moduleConfig.mqtt.username;
+        fault.configuredKey=moduleConfig.mqtt.password;
+        fault.configuredAddress=moduleConfig.mqtt.address;
+        fault.inputFault=true;
+        fault.runOnce();
+        CHECK(!fault.inputFault);
+        auto created=testWsCreated;
+        testMillis+=14999;fault.runOnce();CHECK(testWsCreated==created);
+        testMillis+=15001;
+        fault.runOnce();
+        CHECK(fault.transport.active());
+    }
+    // Malformed input and queue overflow must recover with or without a close
+    // callback, preserving the reconnect delay and releasing queued frames.
+    for (int mode=0;mode<4;++mode) {
+        MvtWssGateway fault;
+        fault.configuredRoom=moduleConfig.mqtt.username;
+        fault.configuredKey=moduleConfig.mqtt.password;
+        fault.configuredAddress=moduleConfig.mqtt.address;
+        testMillis+=15001;fault.runOnce();CHECK(fault.transport.active());
+        MvtWssGateway::handleWsEvent(&fault,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
+        esp_websocket_event_data_t bad={"bad",3,1,nullptr,nullptr,3,1};
+        if(mode<2) fault.receiveFrame(bad);
+        else {
+            esp_websocket_event_data_t full={"{}",2,1,nullptr,nullptr,2,0};
+            for(int i=0;i<9;++i) fault.receiveFrame(full);
+        }
+        CHECK(fault.inputFault);
+        if(mode%2) MvtWssGateway::handleWsEvent(&fault,nullptr,WEBSOCKET_EVENT_DISCONNECTED,nullptr);
+        fault.runOnce();CHECK(!fault.transport.active());CHECK(!fault.inputFault);
+        CHECK(fault.frame.empty());
+        auto created=testWsCreated;
+        testMillis+=14999;fault.runOnce();CHECK(testWsCreated==created);
+        testMillis+=2;fault.runOnce();CHECK(fault.transport.active());
     }
     // Reproduce connected WiFi + repeated DNS/TCP failures: socket retries
     // alone never request a WiFi rejoin on the old implementation.

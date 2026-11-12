@@ -20,6 +20,10 @@
 // "esp_pm_config_esp32_t is deprecated, please include esp_pm.h and use esp_pm_config_t instead"
 #include "esp32/pm.h"
 #include "esp_pm.h"
+#include "esp_system.h"
+#if HAS_MVT_WSS_GATEWAY
+#include "platform/esp32/MvtWssDiagnostics.h"
+#endif
 #if HAS_WIFI
 #include "mesh/wifi/WiFiAPClient.h"
 #endif
@@ -112,6 +116,10 @@ void initDeepSleep()
     bootCount++;
     const char *reason;
     wakeCause = esp_sleep_get_wakeup_cause();
+#if HAS_MVT_WSS_GATEWAY
+    const auto reset = esp_reset_reason();
+    mvt_wss_boot_init(reset, wakeCause, reset != ESP_RST_POWERON && reset != ESP_RST_BROWNOUT);
+#endif
 
     switch (wakeCause) {
     case ESP_SLEEP_WAKEUP_EXT0:
@@ -154,7 +162,8 @@ void initDeepSleep()
     if (hwReason == TG1WDT_SYS_RESET)
         reason = "intWatchdog";
 
-    LOG_INFO("Booted, wake cause %d (boot count %d), reset_reason=%s", wakeCause, bootCount, reason);
+    LOG_INFO("Booted, wake cause %d (boot count %d), reset_reason=%s reset_code=%d", wakeCause, bootCount, reason,
+             int(esp_reset_reason()));
 #endif
 
 #if SOC_RTCIO_HOLD_SUPPORTED
@@ -207,6 +216,10 @@ static void waitEnterSleep(bool skipPreflight = false)
 
 void doDeepSleep(uint32_t msecToWake, bool skipPreflight = false, bool skipSaveNodeDb = false)
 {
+#if HAS_MVT_WSS_GATEWAY
+    // Intent is not proof that sleep completed; actual reset/wake reason is separate.
+    mvt_wss_prepare_sleep(millis(), msecToWake);
+#endif
     if (INCLUDE_vTaskSuspend && (msecToWake == portMAX_DELAY)) {
         LOG_INFO("Enter deep sleep forever");
     } else {

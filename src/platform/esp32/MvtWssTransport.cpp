@@ -2,6 +2,27 @@
 #include "MvtWssTransport.h"
 #include <cstdlib>
 #include <cstring>
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "MvtWssDiagnostics.h"
+#endif
+
+static void allocationFailure(const char *stage) {
+#ifdef ESP_PLATFORM
+    mvt_wss_startup_failure(stage, uint32_t(esp_timer_get_time()/1000),
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    ESP_LOGE("MVT_WSS", "startup failure stage=%s free=%u largest=%u minimum=%u", stage,
+             unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+#else
+    (void)stage;
+#endif
+}
 
 bool MvtWssTransport::ensureWorker() {
     if (worker) return true;
@@ -10,8 +31,12 @@ bool MvtWssTransport::ensureWorker() {
     if (!failed) failed = xQueueCreate(MAX_MESSAGES, sizeof(Entry *));
     if (!finished) finished = xEventGroupCreate();
     if (!admission) admission = xSemaphoreCreateMutex();
-    if (!urgent || !pending || !failed || !finished || !admission) return false;
-    return xTaskCreate(task, "mvt_wss_io", 6144, this, 1, &worker) == pdPASS;
+    if (!urgent || !pending || !failed || !finished || !admission) {
+        allocationFailure("worker_resources"); return false;
+    }
+    const bool started = xTaskCreate(task, "mvt_wss_io", 6144, this, 1, &worker) == pdPASS;
+    if (!started) allocationFailure("worker_task");
+    return started;
 }
 
 bool MvtWssTransport::start(const std::string &address, const char *ca, uint32_t revision) {
@@ -88,6 +113,7 @@ void MvtWssTransport::run() {
             if (client) esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, event, this);
             state = Running;
             if (!client || esp_websocket_client_start(client) != ESP_OK) {
+                allocationFailure(client ? "client_start" : "client_init");
                 callback(context, nullptr, WEBSOCKET_EVENT_DISCONNECTED, nullptr);
                 stopping = true;
             }
