@@ -118,10 +118,22 @@ int32_t DetectionSensorModule::runOnce()
 
 void DetectionSensorModule::sendDetectionMessage()
 {
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+    const auto &channel = channels.getByName(Channels::gpioChannel);
+    // getByName falls back to the primary channel when the name is missing.
+    if (channel.role == meshtastic_Channel_Role_DISABLED ||
+        strcasecmp(channel.settings.name, Channels::gpioChannel) != 0) {
+        LOG_ERROR("Detection Sensor: configure an enabled gpio channel before sending");
+        return;
+    }
+#endif
     LOG_DEBUG("Detected event observed. Send message");
     char *message = new char[40];
     sprintf(message, "%s detected", moduleConfig.detection_sensor.name);
     meshtastic_MeshPacket *p = allocDataPacket();
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+    p->channel = channel.index;
+#endif
     p->want_ack = false;
     p->decoded.payload.size = strlen(message);
     memcpy(p->decoded.payload.bytes, message, p->decoded.payload.size);
@@ -131,7 +143,13 @@ void DetectionSensorModule::sendDetectionMessage()
         p->decoded.payload.size++;
     }
     lastSentToMesh = millis();
-    if (!channels.isDefaultChannel(0)) {
+    if (
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+        true
+#else
+        !channels.isDefaultChannel(0)
+#endif
+    ) {
         LOG_INFO("Send message id=%d, dest=%x, msg=%.*s", p->id, p->to, p->decoded.payload.size, p->decoded.payload.bytes);
         service->sendToMesh(p);
     } else
@@ -141,14 +159,31 @@ void DetectionSensorModule::sendDetectionMessage()
 
 void DetectionSensorModule::sendCurrentStateMessage(bool state)
 {
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+    const auto &channel = channels.getByName(Channels::gpioChannel);
+    if (channel.role == meshtastic_Channel_Role_DISABLED ||
+        strcasecmp(channel.settings.name, Channels::gpioChannel) != 0) {
+        LOG_ERROR("Detection Sensor: configure an enabled gpio channel before sending");
+        return;
+    }
+#endif
     char *message = new char[40];
     sprintf(message, "%s state: %i", moduleConfig.detection_sensor.name, state);
     meshtastic_MeshPacket *p = allocDataPacket();
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+    p->channel = channel.index;
+#endif
     p->want_ack = false;
     p->decoded.payload.size = strlen(message);
     memcpy(p->decoded.payload.bytes, message, p->decoded.payload.size);
     lastSentToMesh = millis();
-    if (!channels.isDefaultChannel(0)) {
+    if (
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+        true
+#else
+        !channels.isDefaultChannel(0)
+#endif
+    ) {
         LOG_INFO("Send message id=%d, dest=%x, msg=%.*s", p->id, p->to, p->decoded.payload.size, p->decoded.payload.bytes);
         service->sendToMesh(p);
     } else
