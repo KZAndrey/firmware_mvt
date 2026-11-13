@@ -1,3 +1,7 @@
+# MOVETAIN GPIO LED — 2.7.15.GPIO_2
+
+Назначение сборки, изменения Detection Sensor, настройка каналов, ограничения и проверки: [подробное описание](docs/gpio-led-detection.md).
+
 <div align="center" markdown="1">
 
 <img src=".github/meshtastic_logo.png" alt="Meshtastic Logo" width="80"/>

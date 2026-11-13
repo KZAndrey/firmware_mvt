@@ -38,6 +38,11 @@ def readProps(prefsLoc):
         verObj["long"] = verObj["short"]
         verObj["deb"] = "{}.{}~{}".format(verObj["short"], run_number, build_location)
 
+    # Dedicated device builds may expose a stable release name instead of a Git suffix.
+    # Keep the upstream major/minor/build short version for compatibility.
+    if version.get("custom"):
+        verObj["long"] = version["custom"]
+
     # print("firmware version " + verStr)
     return verObj
 
