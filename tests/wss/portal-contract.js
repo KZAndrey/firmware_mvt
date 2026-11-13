@@ -5,11 +5,12 @@ const path = require('node:path');
 const [relay, input] = process.argv.slice(2);
 const {nextStatus} = require(path.resolve(relay,'lib/chat-ack.js'));
 const rows = fs.readFileSync(input,'utf8').trim().split('\n').map(JSON.parse);
-const allowed = ['AUTH_GATEWAY','GATEWAY_HEARTBEAT','NODE_UPDATE','CHAT_MESSAGE','CHAT_STATUS_UPDATE','WAYPOINT','NODE_REMOVE',
+const allowed = ['AUTH_GATEWAY','GATEWAY_HEARTBEAT','NODE_RADIO_ACTIVITY','NODE_UPDATE','CHAT_MESSAGE','CHAT_STATUS_UPDATE','WAYPOINT','NODE_REMOVE',
   'RADIO_COMMAND_STATE','AIR_SENSOR_RESULT','PING_RESULT','POLL_ENV_RESULT','TRACEROUTE_RESULT','TRACEROUTE_TIMEOUT','COMMAND_THROTTLED','RADIO_KEY_RESULT'];
 let statuses = 0;
 for (const e of rows) {
   assert(allowed.includes(e.type),`unsupported event ${e.type}`);
+  if(e.type==='NODE_RADIO_ACTIVITY'){assert(Number.isInteger(e.from)&&Number.isInteger(e.id));assert(e.rxAt>=1577836800000);}
   if(e.type==='RADIO_KEY_RESULT'){
     assert.equal(typeof e.requestId,'string');assert.equal(typeof e.ok,'boolean');
     assert(Number.isInteger(e.nodeId));assert(Number.isInteger(e.gatewayId));

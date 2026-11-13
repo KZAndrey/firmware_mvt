@@ -422,7 +422,7 @@ bool MvtWssGateway::sendDocument(cJSON *p) {
     mvtStressMemoryMark(8,strlen(text.get()));
     // Regenerate node state/snapshots after reconnect; replay unsent application
     // events only within the same room/configuration epoch.
-    const bool replay = !priority && strcmp(type,"NODE_UPDATE") && !cJSON_IsTrue(get(p, "snapshot"));
+    const bool replay = !priority && strcmp(type,"NODE_UPDATE") && strcmp(type,"NODE_RADIO_ACTIVITY") && !cJSON_IsTrue(get(p, "snapshot"));
     if(!transport.sendOwned(text.get(),strlen(text.get()),cJSON_free,priority,replay))return false;
     text.release(); // accepted queue owns the existing JSON buffer, no second copy
     return true;
@@ -732,6 +732,16 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     if (!wantPacket(&mp) || mp.decoded.payload.size > sizeof(mp.decoded.payload.bytes)) return ProcessMessage::CONTINUE;
     uint32_t from = mp.from ? mp.from : nodeDB->getNodeNum();
     bool local = from == nodeDB->getNodeNum();
+    // Only live received packets prove activity; NodeDB snapshots never do.
+    // Drop offline activity reports instead of replaying them after reconnection.
+    if (!local && authenticated && mp.id && mp.rx_time >= 1577836800) {
+        auto heard = json(event("NODE_RADIO_ACTIVITY"));
+        setNumber(heard.get(), "from", from);
+        setNumber(heard.get(), "id", mp.id);
+        setNumber(heard.get(), "rxAt", double(uint64_t(mp.rx_time) * 1000));
+        sendDocument(heard.get());
+    }
+
     if (!local && mp.decoded.portnum == meshtastic_PortNum_NODEINFO_APP) {
         meshtastic_User user = meshtastic_User_init_default;
         auto *known = nodeDB->getMeshNode(from);
