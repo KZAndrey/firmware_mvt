@@ -6,6 +6,10 @@
 #include "configuration.h"
 #include "main.h"
 #include <Throttle.h>
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+#include <SHA256.h>
+#include "RTC.h"
+#endif
 DetectionSensorModule *detectionSensorModule;
 
 #define GPIO_POLLING_INTERVAL 100
@@ -84,6 +88,9 @@ int32_t DetectionSensorModule::runOnce()
         return setStartDelay();
     }
 
+    #ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+    sendPending();
+    #endif
     // LOG_DEBUG("Detection Sensor Module: Current pin state: %i", digitalRead(moduleConfig.detection_sensor.monitor_pin));
 
     if (!Throttle::isWithinTimespanMs(lastSentToMesh,
@@ -118,6 +125,10 @@ int32_t DetectionSensorModule::runOnce()
 
 void DetectionSensorModule::sendDetectionMessage()
 {
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+    queueEvent(true, true);
+    return;
+#endif
 #ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
     const auto &channel = channels.getByName(Channels::gpioChannel);
     // getByName falls back to the primary channel when the name is missing.
@@ -160,6 +171,10 @@ void DetectionSensorModule::sendDetectionMessage()
 void DetectionSensorModule::sendCurrentStateMessage(bool state)
 {
 #ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+    queueEvent(state, false);
+    return;
+#endif
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
     const auto &channel = channels.getByName(Channels::gpioChannel);
     if (channel.role == meshtastic_Channel_Role_DISABLED ||
         strcasecmp(channel.settings.name, Channels::gpioChannel) != 0) {
@@ -197,3 +212,62 @@ bool DetectionSensorModule::hasDetectionEvent()
     // LOG_DEBUG("Detection Sensor Module: Current state: %i", currentState);
     return (moduleConfig.detection_sensor.detection_trigger_type & 1) ? currentState : !currentState;
 }
+
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+// ACK authenticates possession of the gpio PSK, not a unique human identity.
+static void deliveryMac(const uint8_t *key, size_t keySize, const uint8_t *body, size_t size, uint8_t *out)
+{
+    SHA256 hash; hash.resetHMAC(key,keySize); hash.update(body,size); hash.finalizeHMAC(key,keySize,out,16);
+}
+bool DetectionSensorModule::prepareDelivery()
+{
+    const auto &ch=channels.getByName(Channels::gpioChannel);
+    const auto &key=ch.settings.psk;
+    if(ch.role==meshtastic_Channel_Role_DISABLED || strcasecmp(ch.settings.name,"gpio") || (key.size!=16 && key.size!=32)) {
+        delivery.clear(); deliveryKeySize=0; return false;
+    }
+    if(deliveryKeySize!=key.size || memcmp(deliveryKey,key.bytes,key.size)) {
+        delivery.clear(); deliveryKeySize=key.size; memcpy(deliveryKey,key.bytes,key.size);
+        SensorDelivery::put32(stream,uint32_t(random())); SensorDelivery::put32(stream+4,uint32_t(random())); sequence=0;
+    }
+    return true;
+}
+void DetectionSensorModule::queueEvent(bool active, bool detection)
+{
+    lastSentToMesh=millis();
+    if(!prepareDelivery())return;
+    auto &item=delivery.allocate(millis()); auto *b=item.bytes;
+    memcpy(b,"MDS2",4); b[4]=1; SensorDelivery::put32(b+5,nodeDB->getNodeNum()); memcpy(b+9,stream,8);
+    SensorDelivery::put32(b+17,++sequence);
+    SensorDelivery::put32(b+21,getValidTime(RTCQualityFromNet));
+    SensorDelivery::put32(b+25,moduleConfig.detection_sensor.state_broadcast_secs);
+    b[29]=delivery.dropped; b[30]=delivery.dropped>>8; b[31]=moduleConfig.detection_sensor.monitor_pin;
+    b[32]=active; b[33]=detection;
+    const char *name=moduleConfig.detection_sensor.name[0]?moduleConfig.detection_sensor.name:"Sensor";
+    b[34]=strnlen(name,20); memcpy(b+35,name,b[34]); item.size=35+b[34]+16;
+    deliveryMac(deliveryKey,deliveryKeySize,b,item.size-16,b+item.size-16);
+    sendPending();
+}
+void DetectionSensorModule::sendPending()
+{
+    if(!prepareDelivery())return;
+    uint32_t now=millis();
+    if(lastDelivery && uint32_t(now-lastDelivery)<15000)return;
+    auto *item=delivery.due(now); if(!item)return;
+    auto *p=allocDataPacket(); p->channel=channels.getByName(Channels::gpioChannel).index;
+    p->want_ack=false; p->decoded.payload.size=item->size; memcpy(p->decoded.payload.bytes,item->bytes,item->size);
+    item->last=now; ++item->attempts; lastDelivery=now; service->sendToMesh(p);
+}
+ProcessMessage DetectionSensorModule::handleReceived(const meshtastic_MeshPacket &mp)
+{
+    if(!moduleConfig.detection_sensor.enabled || !prepareDelivery())return ProcessMessage::CONTINUE;
+    const auto &data=mp.decoded.payload; const auto *b=data.bytes;
+    if(mp.channel!=channels.getByName(Channels::gpioChannel).index || mp.to!=nodeDB->getNodeNum()
+        || data.size!=57 || memcmp(b,"MDS2",4) || b[4]!=2 || SensorDelivery::get32(b+5)!=mp.from
+        || SensorDelivery::get32(b+9)!=nodeDB->getNodeNum())return ProcessMessage::CONTINUE;
+    uint8_t tag[16]; deliveryMac(deliveryKey,deliveryKeySize,b,41,tag);
+    uint8_t different=0; for(size_t i=0;i<16;i++)different|=tag[i]^b[41+i];
+    if(!different && delivery.acknowledge(b))LOG_INFO("Detection Sensor: portal receipt confirmed");
+    return ProcessMessage::STOP;
+}
+#endif
