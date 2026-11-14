@@ -5,6 +5,16 @@ import pathlib, subprocess, sys, tempfile, hashlib, hmac
 root = pathlib.Path(__file__).resolve().parents[1]
 source = (root/'src/modules/DetectionSensorModule.cpp').read_text()
 methods = source[source.index('static void deliveryMac'):source.rindex('#endif')]
+triggers = source[source.index('typedef enum {'):source.index('int32_t DetectionSensorModule::runOnce()')]
+trigger_enums = '''
+enum { meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_LOGIC_LOW,
+meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_LOGIC_HIGH,
+meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_FALLING_EDGE,
+meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_RISING_EDGE,
+meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_EITHER_EDGE_ACTIVE_LOW,
+meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_EITHER_EDGE_ACTIVE_HIGH,
+_meshtastic_ModuleConfig_DetectionSensorConfig_TriggerType_MAX=5 };
+'''
 stub = r'''
 #include <cassert>
 #include <cstring>
@@ -61,12 +71,34 @@ int main(){
  q.clear();for(unsigned i=0;i<5;i++){auto&x=q.allocate(i);x.size=52;}assert(q.dropped==2);
  q.clear();auto&x=q.allocate(0xfffffff0);x.size=52;x.attempts=1;x.last=0xfffffff0;assert(!q.due(100));assert(q.due(uint32_t(0xfffffff0+600000u)));
  m.prepareDelivery();channels.ch.settings.psk.bytes[0]^=1;m.prepareDelivery();for(auto&i:q.items)assert(!i.size);
+ // All six actual trigger handlers, all previous/current raw GPIO combinations.
+ // Polarity normalization is the same expression as hasDetectionEvent().
+ for(int mode=0;mode<6;mode++)for(int prev=0;prev<2;prev++)for(int current=0;current<2;current++){
+   bool p=(mode&1)?prev:!prev,c=(mode&1)?current:!current;
+   auto verdict=handlers[mode](p,c);
+   auto expected=mode<2?(c?DetectionSensorVerdictDetected:DetectionSensorVerdictNoop):
+     mode<4?(!p&&c?DetectionSensorVerdictDetected:DetectionSensorVerdictNoop):
+     p==c?DetectionSensorVerdictNoop:c?DetectionSensorVerdictDetected:DetectionSensorVerdictSendState;
+   assert(verdict==expected);
+   if(verdict!=DetectionSensorVerdictNoop){
+     q.clear();tick+=15000;m.queueEvent(c,verdict==DetectionSensorVerdictDetected);
+     assert(result.decoded.payload.bytes[32]==c);
+     assert(result.decoded.payload.bytes[33]==(verdict==DetectionSensorVerdictDetected));
+   }
+ }
+ // Sustained high-frequency alerts remain bounded; an ACK for an evicted event
+ // must not clear any newer item. No timer-driven infinite retry loop.
+ q.clear();for(int i=0;i<100;i++){tick+=15000;m.queueEvent(true,true);}
+ unsigned occupied=0;for(auto&i:q.items)occupied+=i.size!=0;assert(occupied==4);
+ m.handleReceived(a);occupied=0;for(auto&i:q.items)occupied+=i.size!=0;assert(occupied==4);
+ tick+=1800000;m.sendPending();for(auto&i:q.items)assert(!i.size);
  puts("PASS: queue bounds, retries, expiry, wraparound, key change, wrong ACK, exact ACK, channel selection");
+ puts("PASS: six trigger modes, 24 raw transitions, sustained alerts, evicted ACK isolation");
 }
 '''
 crypto=root/'.pio/libdeps/nrf52_promicro_diy_tcxo/Crypto'
 with tempfile.TemporaryDirectory(prefix='gpio-v2-test-') as td:
- p=pathlib.Path(td);(p/'test.cpp').write_text(stub+methods+main)
+ p=pathlib.Path(td);(p/'test.cpp').write_text(stub+trigger_enums+triggers+methods+main)
  subprocess.run(sys.argv[1:]+['-std=c++17','-I'+str(root/'src/modules'),'-I'+str(crypto),str(p/'test.cpp'),*[str(crypto/f) for f in ['SHA256.cpp','Hash.cpp','Crypto.cpp']],'-o',str(p/'test.exe')],check=True)
  out=subprocess.check_output([str(p/'test.exe')],text=True)
  packet=bytes.fromhex(out.splitlines()[0])
