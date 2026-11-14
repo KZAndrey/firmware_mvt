@@ -55,3 +55,11 @@ The same tested UF2 was subsequently published through the portal owner console 
 ## Explicit clock correction follow-up
 
 `set_time_only` previously called `perhapsSetRTC(..., false)`, so a second local command could receive an ACK while the 12-hour NTP gate ignored it. GPIO builds now pass `forceUpdate=true` only for explicit local (`mp.from == 0`) admin time commands. Remote and non-GPIO behavior is unchanged; RTC epoch validity checks still run. `tests/test_local_clock.py` executes the actual handler for local/remote commands with and without the GPIO compile flag. The portal now samples its server clock and verifies the result using local telemetry rather than trusting ACK or computer time. This is a manual bounded operation, not periodic querying.
+
+### Generation 3 installation and publication evidence
+
+On 2026-11-15, the signed `gpio-v2-clock` release (GPIO_v2, generation 3) was installed on the test node and published through the owner console. Source: `802d454025e066320dd39c46a0465898489ac137`. UF2 SHA-256: `8c2ad297ad05a46ad4a06d9f33f647307442a93b98ce0f270308aa1ed5920236`. Independent public download verified the signature and exact image hash. Configuration, modules, channels and security matched the pre-installation snapshots byte-for-byte; Sensor remains HIGH on GPIO20 and debug logging remains off.
+
+The portal server reported UTC and NTP synchronization enabled. Two live calls through the actual wizard core verified the node clock against server time, including a repeated correction: estimated differences were -0.786 and -0.931 seconds, within the measured uncertainty of about 1.17 seconds. These are whole-second telemetry timestamps, not a claim of subsecond clock accuracy. Historical event timestamps remain unchanged.
+
+Readback correlates the actual protobuf fixed32 request ID. The wizard respects the existing 10-second local telemetry rate limit with an 11-second manual retry cooldown; it does not add an automatic polling or retry loop. Portal commit `8a219b96d074db18f7a70a454623d3fbda76d27a` passed CI run `43638865908` and was confirmed by the production health endpoint. Local unit/browser regressions and the firmware host clock-handler test passed before publication.
