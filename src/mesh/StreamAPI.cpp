@@ -195,21 +195,28 @@ void StreamAPI::emitRebooted()
 
 void StreamAPI::emitLogRecord(meshtastic_LogRecord_Level level, const char *src, const char *format, va_list arg)
 {
-    // In case we send a FromRadio packet
-    memset(&fromRadioScratch, 0, sizeof(fromRadioScratch));
-    fromRadioScratch.which_payload_variant = meshtastic_FromRadio_log_record_tag;
-    fromRadioScratch.log_record.level = level;
-
-    uint32_t rtc_sec = getValidTime(RTCQuality::RTCQualityDevice, true);
-    fromRadioScratch.log_record.time = rtc_sec;
-    strncpy(fromRadioScratch.log_record.source, src, sizeof(fromRadioScratch.log_record.source) - 1);
-
-    auto num_printed =
-        vsnprintf(fromRadioScratch.log_record.message, sizeof(fromRadioScratch.log_record.message) - 1, format, arg);
-    if (num_printed > 0 && fromRadioScratch.log_record.message[num_printed - 1] ==
-                               '\n') // Strip any ending newline, because we have records for framing instead.
-        fromRadioScratch.log_record.message[num_printed - 1] = '\0';
-    emitTxBuffer(pb_encode_to_bytes(txBuf + HEADER_LEN, meshtastic_FromRadio_size, &meshtastic_FromRadio_msg, &fromRadioScratch));
+    // Logging may run inside getFromRadio(), including after its response was encoded.
+    // Never reuse either the response scratch object or its encoded txBuf here.
+    meshtastic_FromRadio record = {};
+    uint8_t logBuf[MAX_STREAM_BUF_SIZE] = {};
+    record.which_payload_variant = meshtastic_FromRadio_log_record_tag;
+    record.log_record.level = level;
+    record.log_record.time = getValidTime(RTCQuality::RTCQualityDevice, true);
+    strncpy(record.log_record.source, src, sizeof(record.log_record.source) - 1);
+    vsnprintf(record.log_record.message, sizeof(record.log_record.message), format, arg);
+    const size_t length = strlen(record.log_record.message);
+    if (length && record.log_record.message[length - 1] == '\n')
+        record.log_record.message[length - 1] = '\0';
+    const size_t encoded = pb_encode_to_bytes(logBuf + HEADER_LEN, meshtastic_FromRadio_size,
+                                            &meshtastic_FromRadio_msg, &record);
+    if (encoded) {
+        logBuf[0] = START1;
+        logBuf[1] = START2;
+        logBuf[2] = (encoded >> 8) & 0xff;
+        logBuf[3] = encoded & 0xff;
+        stream->write(logBuf, encoded + HEADER_LEN);
+        stream->flush();
+    }
 }
 
 /// Hookable to find out when connection changes
