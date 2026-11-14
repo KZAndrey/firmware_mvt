@@ -412,7 +412,13 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         tv.tv_sec = r->set_time_only;
         tv.tv_usec = 0;
 
+        // An explicit local clock command must not be ignored by the 12-hour NTP refresh gate.
+        // Remote time traffic retains the normal quality/rate policy.
+#ifdef MOVETAIN_DETECTION_GPIO_CHANNEL
+        perhapsSetRTC(RTCQualityNTP, &tv, mp.from == 0);
+#else
         perhapsSetRTC(RTCQualityNTP, &tv, false);
+#endif
         break;
     }
     case meshtastic_AdminMessage_enter_dfu_mode_request_tag: {
