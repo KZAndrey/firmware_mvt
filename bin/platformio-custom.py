@@ -109,22 +109,34 @@ Import("projenv")
 prefsLoc = projenv["PROJECT_DIR"] + "/version.properties"
 verObj = readProps(prefsLoc)
 if env.get("PIOENV") == "heltec-v3":
-    verObj["long"] = "2.7.15.1211.night"
+    verObj["long"] = "2.7.15.15.11b"
+    local_build_name = os.environ.get("MVT_LOCAL_BUILD_NAME", "")
+    if local_build_name:
+        if not local_build_name.isalnum() or len(local_build_name) > 12:
+            raise ValueError("Invalid local USB build name")
+        verObj["long"] += "." + local_build_name
     # Optional local USB diagnostic suffix; production builds keep the release version.
     diagnostic_suffix = os.environ.get("MVT_DIAGNOSTIC_SUFFIX", "")
     if diagnostic_suffix:
         if not diagnostic_suffix.isalnum() or len(diagnostic_suffix) > 12:
             raise ValueError("Invalid diagnostic version suffix")
         verObj["long"] += "." + diagnostic_suffix
+    network_observer = os.environ.get("MVT_WSS_NETWORK_OBSERVER") == "1"
+    if network_observer:
+        if not (diagnostic_suffix or local_build_name):
+            raise ValueError("USB network observation requires a distinct local version")
+        env.Append(CPPDEFINES=[("MVT_WSS_NETWORK_OBSERVER", 1)])
+        projenv.Append(CPPDEFINES=[("MVT_WSS_NETWORK_OBSERVER", 1)])
+    if network_observer or os.environ.get("MVT_WSS_STRESS_TEST") == "1":
+        env.Append(LINKFLAGS=["-Wl,--wrap=esp_wifi_internal_tx", "-Wl,--wrap=esp_wifi_internal_tx_by_ref"])
     if os.environ.get("MVT_WSS_STRESS_TEST") == "1":
         if not diagnostic_suffix:
             raise ValueError("USB stress controls require a diagnostic version suffix")
         env.Append(CPPDEFINES=[("MVT_WSS_STRESS_TEST", 1)])
         projenv.Append(CPPDEFINES=[("MVT_WSS_STRESS_TEST", 1)])
-        env.Append(LINKFLAGS=["-Wl,--wrap=esp_wifi_internal_tx", "-Wl,--wrap=esp_wifi_internal_tx_by_ref"])
         env.Append(LINKFLAGS=["-Wl,--wrap=esp_wifi_init"])
     verObj["short"] = "2.7.15"
-    generation = int(os.environ.get("MVT_OTA_GENERATION", "39"))
+    generation = int(os.environ.get("MVT_OTA_GENERATION", "40"))
     if generation < 0 or generation > 2147483647:
         raise ValueError("Invalid OTA generation")
     ota_header = join(env["PROJECT_DIR"], "src/modules/MvtOtaGeneration.h")

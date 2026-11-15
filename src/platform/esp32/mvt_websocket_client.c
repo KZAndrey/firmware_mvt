@@ -49,9 +49,11 @@ static const char *TAG = "WEBSOCKET_CLIENT";
 static TaskHandle_t mvt_alloc_task;
 static uint32_t mvt_alloc_size, mvt_alloc_caps, mvt_alloc_count;
 static bool mvt_alloc_hook_registered;
+#if MVT_WSS_STRESS_TEST || MVT_WSS_NETWORK_OBSERVER
+#include "mvt_stress_allocations.inc"
+#endif
 #if MVT_WSS_STRESS_TEST
 #include "esp_debug_helpers.h"
-#include "mvt_stress_allocations.inc"
 #include "mvt_stress_wifi_trace.inc"
 extern void mvt_stress_memory_freeze(uint32_t uptime);
 #endif
@@ -60,8 +62,10 @@ static void mvt_alloc_failed(size_t size, uint32_t caps, const char *function_na
     (void)function_name;
     if (xPortInIsrContext()) return;
     const bool wss = xTaskGetCurrentTaskHandle() == __atomic_load_n(&mvt_alloc_task, __ATOMIC_RELAXED);
-#if MVT_WSS_STRESS_TEST
+#if MVT_WSS_STRESS_TEST || MVT_WSS_NETWORK_OBSERVER
     mvt_stress_record_alloc((uint32_t)size,caps,pcTaskGetName(NULL),wss,(uint32_t)(xTaskGetTickCount()*portTICK_PERIOD_MS));
+#endif
+#if MVT_WSS_STRESS_TEST
     mvt_stress_capture_wifi_trace((uint32_t)size,caps,pcTaskGetName(NULL),(uint32_t)(xTaskGetTickCount()*portTICK_PERIOD_MS));
     if ((caps & MALLOC_CAP_DMA) && !strncmp(pcTaskGetName(NULL),"wifi",4))
         mvt_stress_memory_freeze((uint32_t)(xTaskGetTickCount()*portTICK_PERIOD_MS));
@@ -202,6 +206,37 @@ static esp_err_t esp_websocket_client_dispatch_event(esp_websocket_client_handle
 // Called under the transport lock, before teardown clears the TLS error tracker.
 // Only numeric diagnostics and constant stage names; never URLs, payloads or credentials.
 #include "mvt_websocket_diagnostics.inc"
+#if MVT_WSS_NETWORK_OBSERVER
+extern void mvt_stress_wifi_tx_snapshot(uint32_t values[4]);
+extern bool mvt_wifi_tx_first_failure(uint32_t values[10]);
+static void mvt_ws_network_sample(void)
+{
+    uint32_t tx[4];
+    mvt_stress_wifi_tx_snapshot(tx);
+    uint32_t first[10];
+    static bool firstReported;
+    if (!firstReported && mvt_wifi_tx_first_failure(first)) {
+        ESP_LOGE(TAG, "MVT_WSS_TX_FIRST_NOMEM uptime_ms=%u dma_free=%u dma_largest=%u dma_minimum=%u alloc_total=%u alloc_wifi=%u alloc_tcpip=%u alloc_wss=%u last_alloc_uptime=%u hook=%u",
+                 (unsigned)first[0],(unsigned)first[1],(unsigned)first[2],(unsigned)first[3],
+                 (unsigned)first[4],(unsigned)first[5],(unsigned)first[6],(unsigned)first[7],
+                 (unsigned)first[8],(unsigned)first[9]);
+        firstReported=true;
+    }
+    ESP_LOGE(TAG, "MVT_WSS_WIFI_TX uptime_ms=%u calls=%u failures=%u no_memory=%u last_error=%u dma_free=%u dma_largest=%u internal_free=%u internal_minimum=%u",
+             (unsigned)(uint32_t)_tick_get_ms(),
+             (unsigned)tx[0], (unsigned)tx[1], (unsigned)tx[2], (unsigned)tx[3],
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    uint32_t alloc[8];
+    char task[16];
+    mvt_stress_alloc_snapshot(alloc,task);
+    ESP_LOGE(TAG, "MVT_WSS_GLOBAL_ALLOC total=%u wifi=%u tcpip=%u wss=%u last_size=%u last_caps=%u last_uptime=%u hook=%u task=%s",
+             (unsigned)alloc[0], (unsigned)alloc[1], (unsigned)alloc[2], (unsigned)alloc[3],
+             (unsigned)alloc[4], (unsigned)alloc[5], (unsigned)alloc[6], (unsigned)alloc[7], task);
+}
+#endif
 static void mvt_ws_diagnostic(esp_websocket_client_handle_t client, const char *stage, int result, int saved_errno)
 {
     int tls_code = 0, tls_flags = 0, tls_error = 0;
@@ -239,6 +274,9 @@ static void mvt_ws_diagnostic(esp_websocket_client_handle_t client, const char *
              (unsigned)__atomic_load_n(&mvt_alloc_count, __ATOMIC_RELAXED),
              (unsigned)__atomic_load_n(&mvt_alloc_size, __ATOMIC_RELAXED),
              (unsigned)__atomic_load_n(&mvt_alloc_caps, __ATOMIC_RELAXED));
+#if MVT_WSS_NETWORK_OBSERVER
+    mvt_ws_network_sample();
+#endif
 }
 
 static esp_err_t esp_websocket_client_abort_connection(esp_websocket_client_handle_t client)
@@ -665,7 +703,18 @@ static void esp_websocket_client_task(void *pv)
 
     client->state = WEBSOCKET_STATE_INIT;
     int read_select = 0;
+#if MVT_WSS_NETWORK_OBSERVER
+    uint32_t last_network_sample = (uint32_t)_tick_get_ms();
+    mvt_ws_network_sample();
+#endif
     while (client->run) {
+#if MVT_WSS_NETWORK_OBSERVER
+        uint32_t sample_now = (uint32_t)_tick_get_ms();
+        if ((uint32_t)(sample_now - last_network_sample) >= 30000) {
+            last_network_sample = sample_now;
+            mvt_ws_network_sample();
+        }
+#endif
         if (xSemaphoreTakeRecursive(client->lock, lock_timeout) != pdPASS) {
             ESP_LOGE(TAG, "Failed to lock ws-client tasks, exiting the task...");
             break;

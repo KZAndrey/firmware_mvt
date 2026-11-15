@@ -38,6 +38,7 @@ def main():
     parser.add_argument('--investigate', action='store_true')
     parser.add_argument('--staged-recovery', action='store_true')
     parser.add_argument('--network-check', action='store_true')
+    parser.add_argument('--memory-pressure', type=int, choices=[1,2,3])
     parser.add_argument('--tx-limit', type=int, choices=[4])
     parser.add_argument('--static-tx', action='store_true')
     parser.add_argument('--static-tx-two', action='store_true')
@@ -85,7 +86,7 @@ def main():
                     line, _, rest = pending.partition(b'\n')
                     pending[:] = rest
                     text = line.decode('utf8', errors='replace')
-                    marker = re.search(r'MVT_(?:HEAP|STRESS|NET)\b.*', text)
+                    marker = re.search(r'MVT_(?:HEAP|STRESS|NET|WSS_TX_FIRST_NOMEM|WSS_WIFI_TX|WSS_GLOBAL_ALLOC)\b.*', text)
                     if not marker:
                         continue
                     text = marker.group(0)
@@ -159,6 +160,16 @@ def main():
         try:
             port.open()
             save()
+            if args.memory_pressure:
+                for trial in range(args.memory_pressure):
+                    first_event=len(events)
+                    scenario(19,'dma-pressure-'+str(trial+1),45)
+                    evidence='\n'.join(e['text'] for e in events[first_event:])
+                    pressure_bytes=re.search(r'pressure_begin bytes=(\d+)',evidence)
+                    if not pressure_bytes or int(pressure_bytes.group(1))==0 or 'pressure_released' not in evidence:
+                        raise RuntimeError('DMA pressure start/release not confirmed')
+                result['status']='pressure-recovered'
+                return
             if args.observe_seconds:
                 observe_until = time.monotonic() + args.observe_seconds
                 result['observations'] = []

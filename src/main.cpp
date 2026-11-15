@@ -1506,7 +1506,7 @@ bool runASAP;
 extern meshtastic_DeviceMetadata getDeviceMetadata()
 {
     meshtastic_DeviceMetadata deviceMetadata;
-    strncpy(deviceMetadata.firmware_version, optstr(APP_VERSION), sizeof(deviceMetadata.firmware_version));
+    snprintf(deviceMetadata.firmware_version, sizeof(deviceMetadata.firmware_version), "%s", optstr(APP_VERSION));
     deviceMetadata.device_state_version = DEVICESTATE_CUR_VER;
     deviceMetadata.canShutdown = pmu_found || HAS_CPU_SHUTDOWN;
     deviceMetadata.hasBluetooth = HAS_BLUETOOTH;

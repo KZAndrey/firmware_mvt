@@ -8,11 +8,11 @@ std::vector<uint8_t> envelope(uint32_t value){
     out[1]=out.size()-2;return out;
 }
 int main(){
-    for(unsigned n=1;n<=18;++n){auto b=envelope(0x4d560000u|n);assert(mvtStressDecode(b.data(),b.size())==n);
+    for(unsigned n=1;n<=19;++n){auto b=envelope(0x4d560000u|n);assert(mvtStressDecode(b.data(),b.size())==n);
         for(size_t size=0;size<b.size();++size)assert(!mvtStressDecode(b.data(),size));
         auto extra=b;extra.push_back(0);assert(!mvtStressDecode(extra.data(),extra.size()));
         b[0]=0x12;assert(!mvtStressDecode(b.data(),b.size()));}
-    for(uint32_t n: {0u,1u,0xffffffffu,0x4d560000u,0x4d560013u,0x4d570002u}){
+    for(uint32_t n: {0u,1u,0xffffffffu,0x4d560000u,0x4d560014u,0x4d570002u}){
         auto b=envelope(n);assert(!mvtStressDecode(b.data(),b.size()));}
     auto overflow=envelope(0x4d560001);overflow.back()=0x74;assert(!mvtStressDecode(overflow.data(),overflow.size()));
     assert(!mvtStressDecode(nullptr,8));

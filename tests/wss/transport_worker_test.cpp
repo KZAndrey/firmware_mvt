@@ -10,13 +10,13 @@ std::atomic<const char*> observedWrite{nullptr};
 std::atomic<unsigned> ownedFrees{0};
 void disposeOwned(void *p){++ownedFrees;std::free(p);}
 std::mutex sentMutex;std::vector<std::string> sent;
-FakeClient *esp_websocket_client_init(const esp_websocket_client_config_t *cfg){assert(cfg->pingpong_timeout_sec==75);if(failInit)return nullptr;++created;return new FakeClient;}
+FakeClient *esp_websocket_client_init(const esp_websocket_client_config_t *cfg){assert(cfg->pingpong_timeout_sec==75);assert(std::string(cfg->subprotocol)=="mvt-wss-v1");if(failInit)return nullptr;++created;return new FakeClient;}
 int esp_websocket_register_events(FakeClient *c,int,void(*fn)(void*,void*,int32_t,void*),void *arg){c->event=fn;c->arg=arg;return 0;}
 int esp_websocket_client_start(FakeClient *c){if(failStart)return -1;sdk=c;return 0;}
 int esp_websocket_client_stop(FakeClient *c){stopEntered=true;while(!allowStop)vTaskDelay(1);c->event(c->arg,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);return 0;}
 int esp_websocket_client_destroy(FakeClient *c){sdk=nullptr;delete c;++destroyed;return 0;}
 bool esp_websocket_client_is_connected(FakeClient*){return writeResult<0;}
-int esp_websocket_client_send_text(FakeClient*,const char *data,int n,int timeout){assert(timeout==5000);observedWrite=data;++writeAttempts;writeEntered=true;while(!allowWrite)vTaskDelay(1);if(writeResult==1){std::lock_guard<std::mutex> lock(sentMutex);sent.emplace_back(data,n);return n;}return writeResult;}
+int esp_websocket_client_send_bin(FakeClient*,const char *data,int n,int timeout){assert(timeout==5000);observedWrite=data;++writeAttempts;writeEntered=true;while(!allowWrite)vTaskDelay(1);if(writeResult==1){std::lock_guard<std::mutex> lock(sentMutex);sent.emplace_back(data,n);return n;}return writeResult;}
 void until(std::function<bool()> f){auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);while(!f()){assert(std::chrono::steady_clock::now()<deadline);vTaskDelay(1);}}
 void connect(MvtWssTransport &t,unsigned epoch){assert(t.start("wss://test/ws","test-ca",epoch));until([]{return sdk.load()!=nullptr;});auto *c=sdk.load();c->event(c->arg,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);until([&]{return t.connected();});}
 void stop(MvtWssTransport &t){t.stop();until([&]{return !t.active();});}
@@ -28,7 +28,7 @@ int main(){
   allowStop=true;allowWrite=false;writeEntered=false;writeResult=1;
   connect(raw,6);
   char payload[5]={'h','e','l','l','o'};
-  assert(!raw.send(nullptr,5,false,false));assert(!raw.send(payload,0,false,false));assert(!raw.send(payload,8193,false,false));
+  assert(!raw.send(nullptr,5,false,false));assert(!raw.send(payload,0,false,false));assert(!raw.send(payload,4097,false,false));
   assert(raw.send(payload,5,true,false));until([]{return writeEntered.load();});
   memset(payload,'x',sizeof(payload));allowWrite=true;
   until([]{std::lock_guard<std::mutex> lock(sentMutex);return !sent.empty();});
@@ -57,20 +57,21 @@ int main(){
  }
  MvtWssTransport t([](void*,void*,int32_t,void*){++callbacks;},nullptr);
  connect(t,7);assert(t.send("first",false,true));until([]{return writeEntered.load();});
- // JSON construction must wait while TLS owns the previous payload; the
- // fixed queue can still accept already-built buffers without blocking.
- assert(!t.canSend(false)&&!t.canSend(true));
+ // Data waits for TLS, but the reserved keepalive slot must stay available.
+ assert(!t.canSend(false)&&t.canSend(true));
  assert(t.send("queued",false,true));
  assert(!t.send("third ordinary frame must remain with caller",false,true));
+ assert(t.canSend(true));
  assert(t.send("heartbeat",true,false));
+ assert(!t.canSend(true));
  auto start=std::chrono::steady_clock::now();assert(!t.send("full",false,true));t.stop();
  assert(std::chrono::steady_clock::now()-start<std::chrono::milliseconds(100));assert(!t.start("wss://other/ws","ca",8));
  assert(!t.send("late",true,true));allowWrite=true;until([]{return stopEntered.load();});
  assert(t.active());int count=callbacks;allowStop=true;until([&]{return !t.active();});assert(callbacks==count); // late CONNECTED suppressed
  std::string failed;uint32_t epoch;int replayed=0;while(t.takeFailed(failed,epoch)){assert(epoch==7);++replayed;}assert(replayed==2);
  // Byte bound also covers the in-flight message; stop must free every slot.
- writeEntered=false;allowWrite=false;connect(t,8);assert(t.send(std::string(8192,'a'),false,true));until([]{return writeEntered.load();});
- assert(t.send(std::string(8192,'b'),false,true));assert(!t.send("over budget",true,true));
+ writeEntered=false;allowWrite=false;connect(t,8);assert(t.send(std::string(4096,'a'),false,true));until([]{return writeEntered.load();});
+ assert(t.send(std::string(4096,'b'),false,true));assert(t.canSend(true));assert(t.send("bounded keepalive",true,false));
  t.stop();allowWrite=true;until([&]{return !t.active();});while(t.takeFailed(failed,epoch))assert(epoch==8);
  // Priority keepalives run before queued snapshots after the in-flight send.
  writeEntered=false;allowWrite=false;writeResult=1;connect(t,9);assert(t.send("data1",false,true));until([]{return writeEntered.load();});

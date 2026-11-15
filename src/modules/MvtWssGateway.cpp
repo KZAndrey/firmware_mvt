@@ -1,6 +1,8 @@
 #include "configuration.h"
 #if HAS_MVT_WSS_GATEWAY
 #include "MvtWssGateway.h"
+#include "MvtWssMessageCodec.h"
+#include "MvtWssMetadata.h"
 #include "mesh/wifi/WiFiAPClient.h"
 #include "platform/esp32/MvtWssDiagnosticJson.h"
 #include "MvtRadioTiming.h"
@@ -72,6 +74,8 @@ void MvtWssGateway::stressSample(const char *phase) {
 }
 void MvtWssGateway::stressTick() {
     const uint32_t now=millis();
+    mvtStressPressureTick();
+    if(stressHalted||mvtOtaUpdater.workerRunning()||mvtOtaUpdater.active())mvtStressPressureCancel();
     if(!stressHalted&&!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active())mvtStressNetTick();
     else mvtStressNetCancel();
     if(stressRejoinPending&&!transport.active()&&!mvtOtaUpdater.workerRunning()&&!mvtOtaUpdater.active()){
@@ -124,19 +128,22 @@ void MvtWssGateway::stressTick() {
         stressRadioPending=true;disconnectWs();return;
     }
     if (command==6) {
+        mvtStressPressureCancel();
         mvtStressNetCancel();stressRadioPending=false;stressRejoinPending=false;
         mvtStressWifiUntil=0;stressBadTargetUntil=0;
         if(mvtStressTxLimit.exchange(0)!=0){stressRadioPending=true;disconnectWs();}
         if(stressWifiHeld){stressWifiHeld=false;WiFi.setAutoReconnect(true);requestWifiReconnect();}
         MVT_STRESS_LOG("MVT_STRESS cancelled cycle=%u",unsigned(stressCycle));return;
     }
-    if(stressHalted||mvtOtaUpdater.workerRunning()||mvtOtaUpdater.active()||stressWifiHeld||stressBadTargetUntil||!isWsConnected()){
+    if(stressHalted||mvtOtaUpdater.workerRunning()||mvtOtaUpdater.active()||stressWifiHeld||stressBadTargetUntil||mvtStressPressureActive()||!isWsConnected()){
         MVT_STRESS_LOG("MVT_STRESS rejected command=%u busy_or_not_ready",command);return;
     }
     ++stressCycle;stressSample("before");
     if(stressHalted)return;
     MVT_STRESS_LOG("MVT_STRESS begin command=%u cycle=%u duration=%u",command,unsigned(stressCycle),unsigned(mvtStressDuration(command)));
-    if(command>=3&&command<=5){
+    if(command==19){
+        mvtStressPressureStart();
+    } else if(command>=3&&command<=5){
         mvtStressWifiUntil=now+mvtStressDuration(command);stressWifiHeld=true;
         WiFi.setAutoReconnect(false);WiFi.disconnect(false,false);
     } else if(command==7){
@@ -275,7 +282,7 @@ const char *presetName(int value) {
     default: return "UNKNOWN";
     }
 }
-const size_t MAX_FRAME = 16384, MAX_NODES = 96, MAX_EVENTS = 32, MAX_PENDING = 16;
+const size_t MAX_FRAME = 4096, MAX_NODES = 96, MAX_EVENTS = 32, MAX_PENDING = 16;
 const size_t NODE_CACHE_BUDGET = 8192;
 const uint32_t ACK_TIMEOUT = 120000;
 }
@@ -331,7 +338,8 @@ void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
         uint16_t code = (uint16_t(uint8_t(d.data_ptr[0])) << 8) | uint8_t(d.data_ptr[1]);
         if (code == 4001 || code == 4401 || code == 4403 || code == 4404) peerRejected = true;
     }
-    if (d.op_code != 1 && d.op_code != 0) return;
+    if (d.op_code == 1) { inputFault = true; return; }
+    if (d.op_code != 2 && d.op_code != 0) return;
     if (d.payload_len <= 0 || size_t(d.payload_len) > MAX_FRAME || d.payload_offset < 0 || d.data_len < 0) {
         inputFault = true; return;
     }
@@ -348,7 +356,6 @@ void MvtWssGateway::receiveFrame(const esp_websocket_event_data_t &d) {
         size_t(d.data_len) > frameExpected - frame.size() || (!d.data_ptr && d.data_len)) {
         inputFault = true; return;
     }
-    if (d.data_len && memchr(d.data_ptr, 0, d.data_len)) { inputFault = true; return; }
     if (d.data_len && !frame.append(d.data_ptr, d.data_len)) { inputFault = true; return; }
     if (frame.size() == frameExpected) {
         // Transfer the completed buffer instead of allocating a second full
@@ -415,16 +422,16 @@ bool MvtWssGateway::sendDocument(cJSON *p) {
     const char *type = str(p, "type");
     const bool priority = !strcmp(type,"AUTH_GATEWAY") || !strcmp(type,"GATEWAY_HEARTBEAT");
     if(!transport.canSend(priority))return false;
-    // cJSON reports allocation failure with nullptr. Avoid converting its
-    // buffer into a second, throwing std::string before the bounded TX queue.
-    std::unique_ptr<char,decltype(&cJSON_free)> text(cJSON_PrintUnformatted(p),cJSON_free);
-    if (!text || !*text) return false;
-    mvtStressMemoryMark(8,strlen(text.get()));
-    // Regenerate node state/snapshots after reconnect; replay unsent application
-    // events only within the same room/configuration epoch.
+    const uint8_t kind=MvtWssMessageCodec::kind(type);
+    const size_t capacity=MvtWssMessageCodec::encode(nullptr,MAX_FRAME,kind,p);
+    if(!capacity)return false;
+    std::unique_ptr<uint8_t,decltype(&free)> bytes(static_cast<uint8_t *>(malloc(capacity)),free);
+    if(!bytes)return false;
+    const size_t size=MvtWssMessageCodec::encode(bytes.get(),capacity,kind,p);
+    if(!size)return false;
     const bool replay = !priority && strcmp(type,"NODE_UPDATE") && strcmp(type,"NODE_RADIO_ACTIVITY") && !cJSON_IsTrue(get(p, "snapshot"));
-    if(!transport.sendOwned(text.get(),strlen(text.get()),cJSON_free,priority,replay))return false;
-    text.release(); // accepted queue owns the existing JSON buffer, no second copy
+    if(!transport.sendOwned(reinterpret_cast<char *>(bytes.get()),size,free,priority,replay))return false;
+    bytes.release();
     return true;
 }
 void MvtWssGateway::publish(cJSON *p) {
@@ -486,29 +493,49 @@ cJSON *MvtWssGateway::gatewayInfo() {
     setBool(p,"otaSupported",mvtOtaUpdater.supported());
     setString(p,"otaModel","heltec-v3");
     setNumber(p,"otaGeneration",MVT_OTA_GENERATION);
-    setString(p,"otaTransfer","wss-chunks-v2");
+    setString(p,"otaTransfer","wss-binary-v1");
     return p;
 }
 void MvtWssGateway::sendAuthGateway() {
-    mvtStressMemoryMark(1);
-    if(!transport.canSend(true))return;
-    auto p = json(event("AUTH_GATEWAY"));
-    if(!p)return;
-    cJSON_AddStringToObject(p.get(), "room", configuredRoom.c_str());
-    cJSON_AddStringToObject(p.get(), "relayKey", configuredKey.c_str());
-    if(!addOwnedItem(p.get(), "gatewayInfo", gatewayInfo()))return;
-    mvtStressMemoryMark(2);
-    authSent = sendDocument(p.get()); authStartedMs = millis();
+    if(!socketConnected||retiring||inputFault||!transport.canSend(true))return;
+    uint8_t frame[768];
+    const size_t size=MvtWssMetadata::auth(frame,sizeof(frame),configuredRoom.c_str(),configuredKey.c_str(),
+        nodeDB->getNodeNum(),owner.long_name[0]?owner.long_name:owner.short_name,xstr(APP_VERSION));
+    authSent=size&&transport.send(reinterpret_cast<const char *>(frame),size,true,false);
+    if(authSent)authStartedMs=millis();
 }
 void MvtWssGateway::sendHeartbeat() {
-    mvtStressMemoryMark(3);
-    if(!transport.canSend(true))return;
-    auto p = json(event("GATEWAY_HEARTBEAT"));
-    if(!p)return;
-    cJSON_AddNumberToObject(p.get(), "timestamp", double(nowMs()));
-    if(!addOwnedItem(p.get(), "gatewayInfo", gatewayInfo()))return;
-    mvtStressMemoryMark(4);
-    if (sendDocument(p.get())) lastHeartbeatMs = millis();
+    if(!socketConnected||retiring||inputFault||!transport.canSend(true))return;
+    uint8_t frame[16];const size_t size=MvtWssWire::heartbeat(frame,sizeof(frame),nowMs());
+    if(size&&transport.send(reinterpret_cast<const char *>(frame),size,true,false))lastHeartbeatMs=millis();
+}
+void MvtWssGateway::sendGatewayInfo() {
+    if(!authenticated||!socketConnected||retiring||inputFault||!transport.canSend(false))return;
+    // Keep optional metadata out of the WiFi emergency reserve. Its diagnostics
+    // are native structures, not JSON trees; only existing node domain data is read.
+    if(ESP.getFreeHeap()<8192||ESP.getMaxAllocHeap()<2048)return;
+    auto node=json(nodeDocument(nodeDB->getNodeNum()));if(!node)return;
+    setString(node.get(),"longName",owner.long_name);setString(node.get(),"shortName",owner.short_name);
+    setNumber(node.get(),"radioBattery",powerStatus?powerStatus->getBatteryChargePercent():0);
+    setNumber(node.get(),"voltage",powerStatus?powerStatus->getBatteryVoltageMv()/1000.0:0);
+    MvtWssMetadata::Info info;info.node=node.get();
+    info.nodeName=owner.long_name[0]?owner.long_name:owner.short_name;info.version=xstr(APP_VERSION);
+    auto *radio=RadioLibInterface::instance;info.radio=radio&&radio->getFreq()>0;
+    char frequency[24]={},channel[48];
+    if(info.radio)snprintf(frequency,sizeof(frequency),"%.3f MHz",double(radio->getFreq()));
+    snprintf(channel,sizeof(channel),"%s (Ch %u)",channels.getName(channels.getPrimaryIndex()),unsigned(channels.getPrimaryIndex()));
+    info.frequency=frequency;info.channel=channel;info.region=regionName(config.lora.region);info.preset=radioPresetName();
+    info.tx=config.lora.tx_enabled;info.hopLimit=effectiveHopLimit();info.ota=mvtOtaUpdater.supported();
+    info.generation=MVT_OTA_GENERATION;info.sampledAt=nowMs();
+    info.hasDisconnect=mvt_wss_last_diagnostic(&info.disconnect);
+    info.hasAttempt=mvt_wss_latest_diagnostic(&info.attempt);
+    info.hasBoot=mvt_wss_boot_diagnostic(&info.startup);
+    const size_t capacity=MvtWssMetadata::encode(nullptr,MAX_FRAME,info);if(!capacity)return;
+    std::unique_ptr<uint8_t,decltype(&free)> frame(static_cast<uint8_t *>(malloc(capacity)),free);if(!frame)return;
+    const size_t size=MvtWssMetadata::encode(frame.get(),capacity,info);
+    if(size&&transport.sendOwned(reinterpret_cast<char *>(frame.get()),size,free,false,false)){
+        frame.release();gatewayInfoPending=false;lastGatewayInfoMs=millis();
+    }
 }
 cJSON *MvtWssGateway::nodeDocument(uint32_t id, bool mv) {
     std::string k = key(id, mv);
@@ -965,13 +992,25 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     return ProcessMessage::CONTINUE;
 }
 
-void MvtWssGateway::handleIncomingCommand(const char *text) {
-    mvtStressMemoryMark(10,text?strlen(text):0);
-    // Require a complete single JSON document, including no trailing garbage.
-    const char *end = nullptr;
-    auto j = json(cJSON_ParseWithOpts(text, &end, true));
-    mvtStressMemoryMark(11);
-    if (!j || !cJSON_IsObject(j.get())) { LOG_WARN("MVT rejected malformed JSON"); return; }
+void MvtWssGateway::handleIncomingCommand(const uint8_t *data,size_t size) {
+    MvtWssWire::View view;
+    if(!MvtWssWire::decode(data,size,view)){inputFault=true;return;}
+    const bool allowed=view.kind==2||view.kind==3||view.kind==5||(view.kind>=22&&view.kind<=34);
+    if(!allowed){inputFault=true;return;}
+    if(view.kind==24){
+        if(!authenticated||authBlocked)return;
+        MvtWssWire::FirmwareChunk chunk;
+        if(!MvtWssWire::firmwareChunk(data,size,chunk)){inputFault=true;return;}
+        mvtOtaUpdater.chunkBinary(chunk);return;
+    }
+    auto *document=MvtWssMessageCodec::decode(data,size);
+    if(!document){inputFault=true;return;}
+    if(view.kind==23)setString(document,"transfer","wss-binary-v1");
+    handleIncomingDocument(document);
+}
+void MvtWssGateway::handleIncomingDocument(cJSON *document) {
+    auto j=json(document);
+    if(!j||!cJSON_IsObject(j.get()))return;
     const std::string type = str(j.get(), "type");
     if (type == "ERROR") {
         const std::string code = str(j.get(), "code");
@@ -995,7 +1034,7 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         // The persisted device setting is authoritative on reconnect.
         if (!authSent) return;
         authenticated = true; displayError = nullptr; retryDelayMs = 15000; snapshotPending = true; lastServerAckMs = millis();
-        LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0;
+        LOG_INFO("MVT WSS authenticated"); lastHeartbeatMs = 0; gatewayInfoPending=true;
 #if MVT_WSS_STRESS_TEST
         stressSample("authenticated");
         mvtStressNetSnapshot(true);
@@ -1063,7 +1102,6 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
         setString(reply.get(), "publicKey", encodeKey(saved->user.public_key.bytes).c_str());
         publish(reply.release()); return;
     }
-    if(type=="CMD_FIRMWARE_CHUNK"){mvtOtaUpdater.chunk(j.get());return;}
     if(type=="CMD_FIRMWARE_UPDATE"){
         bool powered=powerStatus&&(powerStatus->getHasUSB()||powerStatus->getIsCharging()||
             !powerStatus->getHasBattery()||powerStatus->getBatteryChargePercent()>=50);
@@ -1086,9 +1124,9 @@ void MvtWssGateway::handleIncomingCommand(const char *text) {
                 LOG_ERROR("MVT hop limit could not be saved");
             }
         }
-        sendHeartbeat(); return;
+        gatewayInfoPending=true; sendHeartbeat(); return;
     }
-    if (type == "CMD_REFRESH_GATEWAY") { sendHeartbeat(); snapshotPending = true; return; }
+    if (type == "CMD_REFRESH_GATEWAY") { gatewayInfoPending=true; sendHeartbeat(); snapshotPending = true; return; }
     if (type == "WAYPOINT_DELETED" || type == "CMD_DELETE_WAYPOINT") {
         for (auto it = waypoints.begin(); it != waypoints.end();) {
             auto wp = json(cJSON_Parse(it->second.c_str()));
@@ -1402,7 +1440,8 @@ int32_t MvtWssGateway::runOnce() {
     std::string failed; uint32_t failedEpoch;
     while (transport.takeFailed(failed, failedEpoch)) {
         if (failedEpoch == configurationEpoch) {
-            bufferEvent(std::move(failed));
+            auto document=json(MvtWssMessageCodec::decode(reinterpret_cast<const uint8_t *>(failed.data()),failed.size()));
+            if(document)bufferEvent(serialize(document.get()));
         }
     }
     if (retiring) {
@@ -1435,7 +1474,7 @@ int32_t MvtWssGateway::runOnce() {
         // The consumer owns this string even if a command retires the socket
         // and drains the rest of the queue.
         std::unique_ptr<MvtWssRxBuffer> message(text);
-        handleIncomingCommand(message->c_str());
+        handleIncomingCommand(reinterpret_cast<const uint8_t *>(message->c_str()),message->size());
         if (retiring) break;
     }
     if (retiring) return 100;
@@ -1470,8 +1509,9 @@ int32_t MvtWssGateway::runOnce() {
         MvtWssDiagnostic diagnostic{};
         if (mvt_wss_latest_diagnostic(&diagnostic)) networkRecovery.observe(diagnostic, millis());
         // Transport is joined and the OTA worker has released crypto/flash.
-        // At most two rejoins per outage, ten minutes apart, only after
-        // sustained pre-session DNS/TCP failure. No board reboot.
+        // At most two rejoins per outage, ten minutes apart within that outage.
+        // A new authenticated session permits a fresh recovery after two minutes
+        // of sustained pre-session DNS/TCP failure. No board reboot.
         if (!mvtOtaUpdater.active() && networkRecovery.due(millis())) {
             if (requestWifiReconnect()) {
                 networkRecovery.recovered(millis());
@@ -1500,6 +1540,7 @@ int32_t MvtWssGateway::runOnce() {
     if (!nowMs()) return 100;
     advanceAirPolls();
     advancePolls();
+    if(gatewayInfoPending||uint32_t(millis()-lastGatewayInfoMs)>=60000)sendGatewayInfo();
     if (snapshotPending) sendSnapshot();
     for (int i = 0; i < 4 && !outgoing.empty(); ++i) {
         if(!transport.canSend(false))break;

@@ -7,6 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "MvtOtaGeneration.h"
+#include "MvtWssWire.h"
 #ifndef MVT_OTA_GENERATION
 #define MVT_OTA_GENERATION 1
 #endif
@@ -17,6 +18,7 @@ public:
     // Synchronous start rejection; independent of an existing job/worker status.
     const char *startError() const { return startRejection; }
     bool chunk(const cJSON *);
+    bool chunkBinary(const MvtWssWire::FirmwareChunk &);
     void onDisconnect();
     bool workerRunning() const { return workerActive.load(); }
     void tick(bool healthy);

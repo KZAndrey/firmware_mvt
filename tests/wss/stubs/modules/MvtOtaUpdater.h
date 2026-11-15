@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <cJSON.h>
+#include "modules/MvtWssWire.h"
 #define MVT_OTA_GENERATION 1
 extern bool testOtaWorkerRunning;
 extern bool testOtaActive;
@@ -13,7 +14,7 @@ struct MvtOtaUpdater {
  bool supported()const{return false;}
  bool start(const cJSON *,const std::string &,uint32_t){++testOtaStartCalls;return false;}
  const char *startError()const{return testOtaStartError;}
- bool chunk(const cJSON *){return false;}
+ bool chunkBinary(const MvtWssWire::FirmwareChunk &){return false;}
  void tick(bool){}
  bool changed(){return false;}
  bool active()const{return testOtaActive;}

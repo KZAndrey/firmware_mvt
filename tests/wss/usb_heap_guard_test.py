@@ -12,5 +12,10 @@ class GuardTest(unittest.TestCase):
         for settled in (False,True):
             with self.assertRaisesRegex(RuntimeError,'integrity'):
                 validate_heap({'integrity':'0','largest':'9000'},4096,settled)
+    def test_worker_stack_margin(self):
+        for settled in (False, True):
+            validate_heap({'integrity':'1','largest':'9000','workerStack':'1024'},4096,settled)
+            with self.assertRaisesRegex(RuntimeError,'stack reserve'):
+                validate_heap({'integrity':'1','largest':'9000','workerStack':'1023'},4096,settled)
 
 if __name__=='__main__':unittest.main()

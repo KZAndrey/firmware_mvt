@@ -13,7 +13,7 @@ int main(){
  assert(!p.due(120099));assert(p.due(120100));
  p.recovered(120100);p.observe(failure(4),130000);assert(!p.due(9999999));
  p.healthy();p.observe(failure(5),200000);p.observe(failure(6),260000);p.observe(failure(7),320000);
- assert(!p.due(320000));assert(!p.due(720099));assert(p.due(720100)); // 10 min cooldown
+ assert(p.due(320000)); // A new outage must not inherit the previous outage's ten-minute delay.
  p.clear();assert(!p.due(9999999));
  MvtWssNetworkRecovery q;
  q.observe(failure(1),0);q.observe(failure(2),60000);
@@ -34,5 +34,31 @@ int main(){
  retry.recovered(780000);
  for(unsigned n=7;n<=9;++n)retry.observe(failure(n),n*120000);
  assert(!retry.due(2000000));
+ // Local task creation failures prevented further DNS attempts during the
+ // night run. They must not erase already established network failure evidence.
+ MvtWssNetworkRecovery oom;
+ oom.observe(failure(1),100);oom.observe(failure(2),60100);oom.observe(failure(3),120100);
+ oom.observe(failure(4,0,"client_start"),130100);
+ assert(oom.due(130100));
+ // Startup failures alone are not evidence of a broken network.
+ MvtWssNetworkRecovery localOnly;
+ for(unsigned n=1;n<81;++n)localOnly.observe(failure(n,0,"client_start"),n*15000);
+ assert(!localOnly.due(2000000));
+ // A real non-network TLS rejection still cancels the network recovery chain.
+ oom.observe(failure(5,0x8010),140100);assert(!oom.due(999999));
+ MvtWssNetworkRecovery interleaved;
+ interleaved.observe(failure(1),10);
+ interleaved.observe(failure(2,0,"client_start"),60010);
+ interleaved.observe(failure(3),120010);
+ assert(!interleaved.due(999999)); // two real failures still aren't three
+ interleaved.observe(failure(4,0,"client_init"),140010);
+ interleaved.observe(failure(5),150010);assert(interleaved.due(150010));
+ interleaved.recovered(150010);interleaved.healthy();
+ interleaved.observe(failure(6),150011);interleaved.observe(failure(7),150012);
+ interleaved.observe(failure(8),150013);
+ assert(!interleaved.due(270010));assert(interleaved.due(270011));
+ interleaved.recovered(270011);
+ for(unsigned n=9;n<=11;++n)interleaved.observe(failure(n),270011+n);
+ assert(!interleaved.due(870010));assert(interleaved.due(870011));
  puts("WiFi recovery: unique network failures, delay, once per outage, cooldown, healthy reset, non-network exclusions, uptime wrap: PASS");
 }

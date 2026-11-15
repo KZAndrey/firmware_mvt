@@ -5,6 +5,23 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "MvtWssPressure.h"
+static MvtWssPressure pressure;
+bool mvtStressPressureActive(){return pressure.active();}
+void mvtStressPressureCancel(){pressure.cancel([](void *p){heap_caps_free(p);});}
+bool mvtStressPressureStart(){
+    if(pressure.active())return false;
+    constexpr unsigned caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA|MALLOC_CAP_8BIT;
+    const unsigned bytes=pressure.start(uint32_t(esp_timer_get_time()/1000),
+        [](){return heap_caps_get_free_size(caps);},
+        [](size_t n){return heap_caps_malloc(n,caps);});
+    ESP_LOGW("MVT_NET","pressure_begin bytes=%u floor=8192 duration_ms=45000",bytes);
+    return true;
+}
+void mvtStressPressureTick(){
+    if(pressure.tick(uint32_t(esp_timer_get_time()/1000),[](void *p){heap_caps_free(p);}))
+        ESP_LOGW("MVT_NET","pressure_released");
+}
 static MvtMemoryTrace trace;
 void mvtStressMemoryMark(unsigned phase,unsigned bytes){
     if(trace.frozenAt.load())return;

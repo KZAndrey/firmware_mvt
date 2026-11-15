@@ -1,3 +1,4 @@
+#include "modules/MvtWssMessageCodec.h"
 #include <pb_decode.h>
 #include <mbedtls/base64.h>
 // Compile the production gateway with deterministic radio/socket adapters.
@@ -21,6 +22,7 @@ RadioLibInterface *RadioLibInterface::instance = &testRadioInfo;
 #include <new>
 static bool rejectCppAllocation=false;
 bool testAdmissionFull=false;
+size_t testDmaFree=50000,testDmaLargest=20000;
 static unsigned jsonAllocations=0,jsonLive=0;
 static bool rejectJsonAllocation=false;
 static unsigned failJsonAt=0;
@@ -82,7 +84,7 @@ bool meshtastic_NodeDatabase_callback(pb_istream_t *, pb_ostream_t *, const pb_f
 int checks = 0;
 #define CHECK(x) do { ++checks; if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); exit(1); } } while(0)
 using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
-Json parse(const std::string &s) { return Json(cJSON_Parse(s.c_str()), cJSON_Delete); }
+Json parse(const std::string &s) { return Json(!s.empty()&&uint8_t(s[0])==8?MvtWssMessageCodec::decode(reinterpret_cast<const uint8_t *>(s.data()),s.size()):cJSON_Parse(s.c_str()), cJSON_Delete); }
 Json wireObject(cJSON *source) {
     Json owned(source,cJSON_Delete);
     char *text=cJSON_PrintUnformatted(source);
@@ -90,9 +92,17 @@ Json wireObject(cJSON *source) {
 }
 const char *sget(cJSON *j, const char *key) { auto *v = cJSON_GetObjectItemCaseSensitive(j, key); return cJSON_IsString(v) ? v->valuestring : ""; }
 double nget(cJSON *j, const char *key) { auto *v = cJSON_GetObjectItemCaseSensitive(j, key); return cJSON_IsNumber(v) ? v->valuedouble : 0; }
-void frame(MvtWssGateway &g, const std::string &s, size_t chunk = 2048, const char **firstBuffer = nullptr) {
+std::string binaryFixture(const std::string &text) {
+    auto object=parse(text);if(!object)return text;
+    const auto type=MvtWssMessageCodec::kind(sget(object.get(),"type"));
+    if(type==5){auto *stamp=cJSON_DetachItemFromObjectCaseSensitive(object.get(),"timestamp");if(stamp)cJSON_AddItemToObject(object.get(),"timestamp_ms",stamp);}
+    uint8_t buffer[4096];const size_t size=MvtWssMessageCodec::encode(buffer,sizeof(buffer),type,object.get());
+    CHECK(size);return std::string(reinterpret_cast<char *>(buffer),size);
+}
+void frame(MvtWssGateway &g, const std::string &text, size_t chunk = 2048, const char **firstBuffer = nullptr) {
+    std::string encoded;const std::string &s=!text.empty()&&text[0]=='{'?(encoded=binaryFixture(text)):text;
     for (size_t off = 0; off < s.size(); off += chunk) {
-        esp_websocket_event_data_t d = {s.data() + off, int(std::min(chunk, s.size() - off)), 1, nullptr, nullptr, int(s.size()), int(off)};
+        esp_websocket_event_data_t d = {s.data() + off, int(std::min(chunk, s.size() - off)), 2, nullptr, nullptr, int(s.size()), int(off)};
         g.receiveFrame(d);
         if (!off && firstBuffer) *firstBuffer = g.frame.data();
     }
@@ -122,7 +132,7 @@ void ack(MvtWssGateway &g, uint32_t from, uint32_t id, int reason = 0, uint32_t 
     g.handleReceived(p);
 }
 void command(MvtWssGateway &g, const char *text) {
-    g.handleIncomingCommand(text);
+    g.handleIncomingDocument(cJSON_Parse(text));
     // Existing wire assertions inspect the next actual dispatch, after spacing.
     bool queued=std::any_of(g.pending.begin(),g.pending.end(),[](const MvtWssGateway::Pending &p){return !p.id;}) ||
         std::any_of(g.polls.begin(),g.polls.end(),[](const MvtWssGateway::Poll &p){return !p.sent;}) ||
@@ -130,7 +140,7 @@ void command(MvtWssGateway &g, const char *text) {
     if(queued&&!g.diagnosticSlot()){testMillis=g.nextDiagnosticAt;healthyTick(g);}
 }
 void healthyTick(MvtWssGateway &g) {
-    if(g.authenticated)g.handleIncomingCommand("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}");
+    if(g.authenticated)g.handleIncomingDocument(cJSON_Parse("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}"));
     g.runOnce();
 }
 int main(int argc, char **argv) {
@@ -159,7 +169,7 @@ int main(int argc, char **argv) {
     frame(g, "{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1791892800000}"); healthyTick(g);
     CHECK(g.nowMs() == 1791892800000ULL); flush(g);
     {
-        auto e=parse("{\"type\":\"TEST_CONTENTION\"}");
+        auto e=parse("{\"type\":\"NODE_REMOVE\"}");
         testSendBusy=true;CHECK(!g.sendDocument(e.get()));CHECK(!g.inputFault);CHECK(g.socketConnected);
         testSendBusy=false;CHECK(g.sendDocument(e.get()));
         testSendFailure=true;CHECK(!g.sendDocument(e.get()));CHECK(!g.inputFault);
@@ -176,7 +186,7 @@ int main(int argc, char **argv) {
         CHECK(!threw);CHECK(!accepted);CHECK(g.socketConnected);
         cJSON_Hooks hooks{trackedJsonAlloc,trackedJsonFree};cJSON_InitHooks(&hooks);
         rejectJsonAllocation=true;jsonAllocations=0;
-        CHECK(!g.sendDocument(e.get()));CHECK(jsonAllocations>0);CHECK(jsonLive==0);
+        CHECK(g.sendDocument(e.get()));CHECK(jsonAllocations==0);CHECK(jsonLive==0);testSent.pop_back();
         g.socketConnected=false;jsonAllocations=0;CHECK(!g.sendDocument(e.get()));CHECK(jsonAllocations==0);g.socketConnected=true;
         rejectJsonAllocation=false;testSendBusy=true;
         CHECK(!g.sendDocument(e.get()));CHECK(jsonLive==0);
@@ -186,7 +196,7 @@ int main(int argc, char **argv) {
     {
         const auto sentBefore=testSent.size();
         g.snapshot.push_back("N!aabbccdd");g.snapshotPending=true;
-        g.outgoing.push_back("{\"type\":\"TEST_BACKPRESSURE\"}");
+        g.outgoing.push_back("{\"type\":\"NODE_REMOVE\"}");
         testAdmissionFull=true;
         cJSON_Hooks hooks{trackedJsonAlloc,trackedJsonFree};cJSON_InitHooks(&hooks);jsonAllocations=0;
         g.sendHeartbeat();g.sendAuthGateway();g.sendSnapshot();g.runOnce();
@@ -194,7 +204,7 @@ int main(int argc, char **argv) {
         CHECK(testSent.size()==sentBefore);
         cJSON_InitHooks(nullptr);testAdmissionFull=false;flush(g);
         CHECK(g.snapshot.empty()&&g.outgoing.empty());
-        CHECK(lastEvent(g,"TEST_BACKPRESSURE")!=nullptr);
+        CHECK(lastEvent(g,"NODE_REMOVE")!=nullptr);
         testSent.erase(testSent.begin()+sentBefore,testSent.end());
     }
     {
@@ -220,6 +230,30 @@ int main(int argc, char **argv) {
         testDiagnostic=savedDiagnostic;
         g.authSent=savedAuthSent;
         failJsonAt=0;testSendBusy=false;cJSON_InitHooks(nullptr);
+    }
+    {
+        const auto first=testSent.size();
+        const auto previousHeartbeat=g.lastHeartbeatMs.load();
+        // A busy WiFi heap must not pay for the full metadata tree just to
+        // prove liveness. Also cover fragmentation with ample total memory.
+        for(auto limits : {std::make_pair(size_t(8192),size_t(4096)),
+                           std::make_pair(size_t(50000),size_t(2048))}) {
+            testDmaFree=limits.first;testDmaLargest=limits.second;
+            g.sendHeartbeat();
+            auto heartbeat=parse(testSent.back());
+            CHECK(std::string(sget(heartbeat.get(),"type"))=="GATEWAY_HEARTBEAT");
+            CHECK(cJSON_GetObjectItem(heartbeat.get(),"gatewayInfo")==nullptr);
+            CHECK(nget(heartbeat.get(),"timestamp")>0);
+            CHECK(testSent.back().size()<=15);
+            CHECK(g.lastHeartbeatMs==testMillis);
+        }
+        testDmaFree=50000;testDmaLargest=20000;
+        g.sendHeartbeat();
+        auto heartbeat=parse(testSent.back());
+        CHECK(cJSON_GetObjectItem(heartbeat.get(),"gatewayInfo")==nullptr);
+        CHECK(testSent.size()==first+3);
+        g.lastHeartbeatMs=previousHeartbeat;
+        testSent.erase(testSent.begin()+first,testSent.end());
     }
     {
         const auto first=testSent.size();
@@ -359,7 +393,9 @@ int main(int argc, char **argv) {
     CHECK(radio.sent.back().to == 0xffffffff && !radio.sent.back().want_ack);
     CHECK(std::string(sget(lastEvent(g, "CHAT_STATUS_UPDATE").get(), "status")) == "SENT");
     size_t count = radio.sent.size();
-    command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":45,\"text\":\"bad\"}garbage"); CHECK(radio.sent.size() == count);
+    auto malformed=binaryFixture("{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":45,\"text\":\"bad\"}")+"garbage";
+    g.handleIncomingCommand(reinterpret_cast<const uint8_t *>(malformed.data()),malformed.size());
+    CHECK(g.inputFault&&radio.sent.size()==count);g.inputFault=false;
     command(g, "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":45,\"recipientId\":2.5,\"text\":\"bad\"}"); CHECK(radio.sent.size() == count);
     std::string longText(234, 'x');
     command(g, ("{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":46,\"text\":\"" + longText + "\"}").c_str());
@@ -547,8 +583,8 @@ int main(int argc, char **argv) {
     // thirty-two large offline events to occupy the entire internal heap.
     {
         MvtWssGateway bounded;
-        frame(bounded,std::string(6000,' '));frame(bounded,std::string(6000,' '));
-        frame(bounded,std::string(6000,' '));
+        frame(bounded,std::string(1800,' '));frame(bounded,std::string(1800,' '));
+        frame(bounded,std::string(1800,' '));
         CHECK(bounded.inputFault&&bounded.incoming->values.size()==2);
         bounded.disconnectWs();CHECK(bounded.incoming->values.empty());
         for(int n=0;n<32;++n){auto *e=cJSON_CreateObject();cJSON_AddStringToObject(e,"text",std::string(2000,'x').c_str());bounded.publish(e);}
@@ -581,9 +617,9 @@ int main(int argc, char **argv) {
     config.lora.hop_limit = 6; // Meshtastic admin-side change, followed by reconnect.
     command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\",\"wssHopLimit\":3}"); CHECK(g.effectiveHopLimit() == 6);
     hopPacket = g.packet(0xaabbccdd); CHECK(hopPacket->hop_limit == 6); packetPool.release(hopPacket);
-    std::string padded = "{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":99,\"text\":\"chunked\",\"padding\":\"" + std::string(5000, 'a') + "\"}";
+    std::string padded = binaryFixture("{\"type\":\"CMD_TX_LORA_CHAT\",\"id\":99,\"text\":\"chunked\"}");
     const char *receivedBuffer = nullptr;
-    count = radio.sent.size(); frame(g, padded, 111, &receivedBuffer); CHECK(radio.sent.size() == count);
+    count = radio.sent.size(); frame(g, padded, 5, &receivedBuffer); CHECK(radio.sent.size() == count);
     // Completed frames must transfer their buffer to the queue, not retain a
     // second payload-sized allocation while the consumer allocates JSON.
     CHECK(g.frame.capacity() < padded.size());
@@ -718,9 +754,9 @@ int main(int argc, char **argv) {
         db.nodes.back().hops_away=4;
         config.lora=previous;db.nodes.back().hops_away=0;
         auto start=testMillis;auto before=radio.sent.size();
-        adaptive.handleIncomingCommand("{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2575857510}");
+        adaptive.handleIncomingDocument(cJSON_Parse("{\"type\":\"CMD_POLL_ENV\",\"targetNodeId\":2575857510}"));
         CHECK(radio.sent.size()==before+1);CHECK(adaptive.pending.front().timeout==120000);
-        adaptive.handleIncomingCommand("{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}");
+        adaptive.handleIncomingDocument(cJSON_Parse("{\"type\":\"CMD_PING_NODE\",\"targetNodeId\":2864434397}"));
         CHECK(radio.sent.size()==before+1);CHECK(adaptive.polls.front().sent==0);
         auto state=lastEvent(adaptive,"RADIO_COMMAND_STATE");CHECK(std::string(sget(state.get(),"state"))=="queued");
         testMillis=start+2999;healthyTick(adaptive);CHECK(radio.sent.size()==before+1);
@@ -802,7 +838,7 @@ int main(int argc, char **argv) {
             testMillis+=15001;reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
             MvtWssGateway::handleWsEvent(&reconnect,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
             reconnect.runOnce();CHECK(reconnect.authSent);
-            reconnect.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");CHECK(reconnect.authenticated);
+            reconnect.handleIncomingDocument(cJSON_Parse("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}"));CHECK(reconnect.authenticated);
             reconnect.frame.reserve(8192);
             auto destroyed=testWsDestroyed;
             MvtWssGateway::handleWsEvent(&reconnect,nullptr,cycle%2?WEBSOCKET_EVENT_CLOSED:WEBSOCKET_EVENT_DISCONNECTED,nullptr);
@@ -813,8 +849,8 @@ int main(int argc, char **argv) {
         }
         testMillis+=15001;reconnect.runOnce();
         MvtWssGateway::handleWsEvent(&reconnect,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
-        reconnect.runOnce();reconnect.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");
-        testMillis+=74000;reconnect.handleIncomingCommand("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}");
+        reconnect.runOnce();reconnect.handleIncomingDocument(cJSON_Parse("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}"));
+        testMillis+=74000;reconnect.handleIncomingDocument(cJSON_Parse("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}"));
         reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
         testMillis+=75000;reconnect.runOnce();CHECK(reconnect.transport.client==nullptr);CHECK(!reconnect.authenticated);
         testMillis+=15001;reconnect.runOnce();CHECK(reconnect.transport.client!=nullptr);
@@ -822,7 +858,7 @@ int main(int argc, char **argv) {
     // Receiving a valid bounded frame must not throw on allocation failure.
     {
         MvtWssGateway failedRx;
-        const std::string payload(8192, ' ');
+        const std::string payload(4096, ' ');
         bool escaped=false;
         rejectCppAllocation=true;
         try { frame(failedRx,payload,111); } catch(const std::bad_alloc &) { escaped=true; }
@@ -947,6 +983,11 @@ int main(int argc, char **argv) {
             recovery.runOnce();CHECK(testWifiRecoveryRequests==before);
             if(n<3)testMillis+=60000;
         }
+        // Receiver task allocation failed after the established DNS/TCP
+        // outage. This must neither erase that evidence nor bypass OTA guards.
+        testDiagnostic.sequence=4;testDiagnostic.tlsError=0;
+        strcpy(testDiagnostic.stage,"client_start");
+        recovery.runOnce();CHECK(testWifiRecoveryRequests==before);
         testOtaActive=false;
         testOtaWorkerRunning=true;
         recovery.runOnce();CHECK(testWifiRecoveryRequests==before);
@@ -955,9 +996,10 @@ int main(int argc, char **argv) {
         recovery.runOnce();CHECK(testWifiRecoveryRequests==before);
         recovery.disconnectWs();
         recovery.runOnce();CHECK(testWifiRecoveryRequests==before+1);
-        for(unsigned n=4;n<20;++n){
+        strcpy(testDiagnostic.stage,"connect");testDiagnostic.tlsError=0x8001;
+        for(unsigned n=5;n<21;++n){
             testMillis+=60000;testDiagnostic.sequence=n;testDiagnostic.uptimeMs=testMillis;
-            recovery.runOnce();CHECK(testWifiRecoveryRequests==before+(n<13?1:2));
+            recovery.runOnce();CHECK(testWifiRecoveryRequests==before+(n<14?1:2));
         }
         CHECK(std::string(recovery.configuredKey)==moduleConfig.mqtt.password);
         testDiagnostic={};
@@ -975,7 +1017,7 @@ int main(int argc, char **argv) {
             retry.configuredRoom=roomBefore;
             retry.configuredKey=keyBefore;
             retry.configuredAddress=moduleConfig.mqtt.address;
-            retry.outgoing.push_back("{\"type\":\"TEST_RETAINED_EVENT\"}");
+            retry.outgoing.push_back("{\"type\":\"NODE_REMOVE\"}");
             const auto sentBefore=testSent.size();
             for (int attempt=0;attempt<failures;++attempt) {
                 testMillis+=attempt==0?15001:1;retry.runOnce();
@@ -999,14 +1041,14 @@ int main(int argc, char **argv) {
             MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
             retry.runOnce();CHECK(retry.authSent&&!retry.authenticated);
             CHECK(std::string(sget(parse(testSent.back()).get(),"type"))=="AUTH_GATEWAY");
-            retry.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");
-            retry.handleIncomingCommand("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}");
+            retry.handleIncomingDocument(cJSON_Parse("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}"));
+            retry.handleIncomingDocument(cJSON_Parse("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}"));
             flush(retry);
             CHECK(retry.authenticated&&retry.outgoing.empty());
             CHECK(std::string(retry.displayStatus())=="OK");
             unsigned delivered=0;
             for(size_t i=sentBefore;i<testSent.size();++i)
-                if(std::string(sget(parse(testSent[i]).get(),"type"))=="TEST_RETAINED_EVENT")++delivered;
+                if(std::string(sget(parse(testSent[i]).get(),"type"))=="NODE_REMOVE")++delivered;
             CHECK(delivered==1);
             CHECK(roomBefore==moduleConfig.mqtt.username&&keyBefore==moduleConfig.mqtt.password);
             // Synthetic event is local to this fault-injection test, not part
@@ -1041,18 +1083,18 @@ int main(int argc, char **argv) {
         MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);
         retry.runOnce();CHECK(retry.authSent);
         std::string message=std::string("{\"type\":\"ERROR\",\"code\":\"")+code+"\"}";
-        retry.handleIncomingCommand(message.c_str());CHECK(!retry.authBlocked&&!retry.authenticated);
+        retry.handleIncomingDocument(cJSON_Parse(message.c_str()));CHECK(!retry.authBlocked&&!retry.authenticated);
         auto created=testWsCreated;testMillis+=retry.retryDelayMs;retry.runOnce();CHECK(testWsCreated==created);
         testMillis+=1;retry.runOnce();CHECK(testWsCreated==created+1);
         MvtWssGateway::handleWsEvent(&retry,nullptr,WEBSOCKET_EVENT_CONNECTED,nullptr);retry.runOnce();
-        retry.handleIncomingCommand("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");CHECK(retry.authenticated);
+        retry.handleIncomingDocument(cJSON_Parse("{\"type\":\"AUTH_GATEWAY_SUCCESS\"}"));CHECK(retry.authenticated);
         CHECK(retry.retryDelayMs==15000);
     }
     for (const char *code : {"INVALID_RELAY_KEY", "ROOM_NOT_FOUND", "GATEWAY_REPLACED", "ADMIN_RESTRICTED"}) {
         MvtWssGateway blocked;blocked.configuredRoom=moduleConfig.mqtt.username;blocked.configuredKey=moduleConfig.mqtt.password;
         blocked.configuredAddress=moduleConfig.mqtt.address;
         std::string message=std::string("{\"type\":\"ERROR\",\"code\":\"")+code+"\"}";
-        blocked.handleIncomingCommand(message.c_str());auto created=testWsCreated;
+        blocked.handleIncomingDocument(cJSON_Parse(message.c_str()));auto created=testWsCreated;
         testMillis+=3600000;blocked.runOnce();CHECK(blocked.authBlocked&&testWsCreated==created);
     }
     {
@@ -1172,6 +1214,6 @@ int main(int argc, char **argv) {
             CHECK(size == bytes.size() && std::equal(bytes.begin(), bytes.end(), encoded));
         }
     }
-    if (argc > 2) { std::ofstream transcript(argv[2]); for (auto &e : testSent) transcript << e << '\n'; }
+    if (argc > 2) { std::ofstream transcript(argv[2]); for (auto &e : testSent) {auto document=parse(e);CHECK(document);char *text=cJSON_PrintUnformatted(document.get());CHECK(text);transcript << text << '\n';cJSON_free(text);} }
     printf("WSS production handlers: %d checks passed\n", checks);
 }

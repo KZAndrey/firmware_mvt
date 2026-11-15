@@ -35,7 +35,9 @@ bool MvtWssTransport::ensureWorker() {
     if (!urgent || !pending || !failed || !finished || !admission) {
         allocationFailure("worker_resources"); return false;
     }
-    const bool started = xTaskCreate(task, "mvt_wss_io", 6144, this, 1, &worker) == pdPASS;
+    // This queue worker does not run the TLS handshake/parser. Leave the SDK
+    // receiver's 6144-byte stack unchanged; avoid reserving that size twice.
+    const bool started = xTaskCreate(task, "mvt_wss_io", 4096, this, 1, &worker) == pdPASS;
     if (!started) allocationFailure("worker_task");
     return started;
 }
@@ -61,7 +63,7 @@ bool MvtWssTransport::sendOwned(char *text,size_t length,void (*dispose)(void *)
     return dispose && sendBuffer(text,length,dispose,priority,replay);
 }
 bool MvtWssTransport::sendBuffer(const char *text,size_t length,void (*dispose)(void *),bool priority,bool replay) {
-    if (!connected() || state != Running || !text || !length || length > 8192) return false;
+    if (!connected() || state != Running || !text || !length || length > 4096) return false;
     if (messages.fetch_add(1) >= (priority?MAX_MESSAGES:MAX_MESSAGES-1)) { --messages; return false; }
     if (bytes.fetch_add(length) + length > MAX_BYTES) {
         bytes.fetch_sub(length); --messages; return false;
@@ -122,7 +124,7 @@ void MvtWssTransport::run() {
         if (state == Starting && !stopping.load()) {
             mvtStressMemoryMark(12);
             esp_websocket_client_config_t cfg = {};
-            cfg.uri = url.c_str(); cfg.cert_pem = certificate;
+            cfg.uri = url.c_str(); cfg.cert_pem = certificate; cfg.subprotocol="mvt-wss-v1";
             cfg.task_stack = 6144; cfg.buffer_size = 2048;
             cfg.ping_interval_sec = 20; cfg.pingpong_timeout_sec = 75;
             cfg.disable_auto_reconnect = true;
@@ -153,7 +155,7 @@ void MvtWssTransport::run() {
                 xQueueReceive(pending, &inFlight, 0);
             if (inFlight) {
                 mvtStressMemoryMark(13,inFlight->size);
-                const int sent = esp_websocket_client_send_text(client, inFlight->text, inFlight->size, pdMS_TO_TICKS(5000));
+                const int sent = esp_websocket_client_send_bin(client, inFlight->text, inFlight->size, pdMS_TO_TICKS(5000));
                 mvtStressMemoryMark(14,inFlight->size);
                 if (sent == int(inFlight->size)) { release(inFlight); inFlight = nullptr; }
                 else if (!(sent < 0 && esp_websocket_client_is_connected(client))) {

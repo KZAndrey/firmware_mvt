@@ -17,6 +17,8 @@ zig = str(Path(args.zig).resolve())
 build = root / '.tools' / 'wss-tests'
 build.mkdir(parents=True, exist_ok=True)
 env = dict(os.environ, ZIG_LOCAL_CACHE_DIR=str(build / 'cache'), ZIG_GLOBAL_CACHE_DIR=str(build / 'global-cache'))
+from network_probe_test import run as test_network_probe
+test_network_probe(root, build, zig, env)
 subprocess.run([sys.executable,'tests/wss/usb_heap_guard_test.py'],check=True)
 from nodedb_capacity_test import run as test_nodedb_capacity
 test_nodedb_capacity(root, build, zig, env)
@@ -26,8 +28,14 @@ memory_trace=build/'memory_trace_test.exe'
 subprocess.run([zig,'c++','-std=c++14','-O0','tests/wss/memory_trace_test.cpp','-o',str(memory_trace)],env=env,check=True)
 subprocess.run([str(memory_trace)],check=True)
 tx_probe=build/'stress_wifi_tx_test.exe'
+pressure=build/'pressure_test.exe'
+subprocess.run([zig,'c++','-std=c++14','-O0','tests/wss/pressure_test.cpp','-o',str(pressure)],env=env,check=True)
+subprocess.run([str(pressure)],check=True)
 subprocess.run([zig,'c++','-std=c++14','-O0','-Itests/wss/tx-probe-stubs','tests/wss/stress_wifi_tx_test.cpp','-o',str(tx_probe)],env=env,check=True)
 subprocess.run([str(tx_probe)],check=True)
+tx_observer=build/'wifi_tx_observer_test.exe'
+subprocess.run([zig,'c++','-std=c++14','-O0','-DMVT_WSS_STRESS_TEST=0','-DMVT_WSS_NETWORK_OBSERVER=1','-Itests/wss/tx-probe-stubs','tests/wss/stress_wifi_tx_test.cpp','-o',str(tx_observer)],env=env,check=True)
+subprocess.run([str(tx_observer)],check=True)
 heap_pool=build/'bounded_heap_pool_test.exe'
 subprocess.run([zig,'c++','-std=c++14','-O0','tests/wss/bounded_heap_pool_test.cpp','-o',str(heap_pool)],env=env,check=True)
 subprocess.run([str(heap_pool)],check=True)
@@ -109,6 +117,8 @@ with (build / 'compile.log').open('w', encoding='utf-8') as log:
                     str(build / 'cJSON.o'), '-o', str(cancellation_test)],
                    env=env, stdout=log, stderr=log, check=True)
     generated = [str(p) for p in (root / 'src/mesh/generated/meshtastic').glob('*.cpp')]
+    from metadata_version_test import run as test_metadata_version
+    test_metadata_version(root, build, zig, env, flags, generated, objects)
     exe = build / 'gateway_test.exe'
     subprocess.run([zig, 'c++', *flags, '-std=c++11', 'tests/wss/gateway_test.cpp',
                     'src/modules/MvtWssGateway.cpp', *generated, *objects, '-o', str(exe)],

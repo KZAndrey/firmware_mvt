@@ -21,10 +21,11 @@ public:
     void shutdown(); // joins only during destruction, never from the mesh loop
     bool active() const { return state.load() != Idle; }
     bool connected() const { return online.load() && !stopping.load(); }
-    // Gate JSON construction while TLS owns a previous payload. Already-built
-    // buffers still use send()'s atomic count/byte bounds and priority queue.
-    bool canSend(bool /*priority*/) const {
-        return connected() && state.load()==Running && messages.load()==0;
+    // Avoid building another data document while TLS owns one. Short control
+    // frames may use the reserved slot; sendBuffer enforces admission atomically.
+    bool canSend(bool priority) const {
+        return connected() && state.load()==Running &&
+            (priority ? messages.load()<MAX_MESSAGES && bytes.load()<MAX_BYTES : messages.load()==0);
     }
     bool send(const std::string &text, bool priority, bool replay);
     bool send(const char *text, size_t length, bool priority, bool replay);

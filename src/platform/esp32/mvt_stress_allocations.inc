@@ -1,4 +1,4 @@
-// Test-only, boot-lifetime counters across tasks. No allocation, logging or
+// Optional USB observation, boot-lifetime counters across tasks. No allocation, logging or
 // blocking in the allocator hook. A contended last-record update is skipped.
 static uint32_t mvt_stress_alloc_counts[4];
 static uint32_t mvt_stress_alloc_last[3];

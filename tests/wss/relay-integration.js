@@ -6,6 +6,8 @@ const {createRequire} = require('node:module');
 const [relayArg, transcript] = process.argv.slice(2), relay = path.resolve(relayArg);
 const load = createRequire(path.join(relay,'server.js'));
 const WebSocket = load('ws');
+const binaryFixture=load('./test-support/direct-wss-client');
+const codec=load('./lib/direct-wss-messages');
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(),'mvt-wss-compat-'));
 Object.assign(process.env,{DATA_DIR:dataDir,STORAGE_SECRET:'test-only-wss-compat-secret',MQTT_ENABLED:'false',FIREBASE_PROJECT_ID:'movetain-b8468'});
 const api = load('./server.js');
@@ -20,10 +22,10 @@ function token(uid) {
 }
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn) { const deadline=Date.now()+5000; while (!fn()) { if(Date.now()>deadline)throw Error('timeout'); await delay(10); } }
-async function connect(url) {
-  const ws=new WebSocket(url), messages=[]; ws.on('message',b=>messages.push(JSON.parse(b.toString())));
+async function connect(url,binary=false) {
+  const ws=new WebSocket(url,binary?'mvt-wss-v1':undefined), messages=[]; ws.on('message',(b,isBinary)=>messages.push(binaryFixture.decode(ws,b,isBinary)));
   await new Promise((resolve,reject)=>{ws.once('open',resolve);ws.once('error',reject);});
-  return {ws,messages,send:e=>ws.send(JSON.stringify(e))};
+  return {ws,messages,send:e=>binaryFixture.send(ws,e)};
 }
 (async()=>{
   let gateway, coord, owner;
@@ -34,12 +36,14 @@ async function connect(url) {
     room.guestPermissions = {'test-coordinator': {access: {role:'coordinator', pending:false, revoked:false}}};
     await new Promise(resolve=>api.server.listen(0,'127.0.0.1',resolve));
     const url=`ws://127.0.0.1:${api.server.address().port}/ws`;
-    gateway=await connect(url); const rows=fs.readFileSync(transcript,'utf8').trim().split('\n').map(JSON.parse);
-    gateway.send(rows.find(e=>e.type==='AUTH_GATEWAY'));
+    gateway=await connect(url,true); const rows=fs.readFileSync(transcript,'utf8').trim().split('\n').map(JSON.parse);
+    const auth=rows.find(e=>e.type==='AUTH_GATEWAY');const {type,...authBody}=auth;
+    gateway.ws.send(codec.encode(type,authBody));
     await until(()=>gateway.messages.some(e=>e.type==='AUTH_GATEWAY_SUCCESS'));
-    const advertisedHops=rows.find(e=>e.type==='AUTH_GATEWAY').gatewayInfo.hopLimit;
-    assert.equal(gateway.messages.find(e=>e.type==='AUTH_GATEWAY_SUCCESS').wssHopLimit,advertisedHops);
-    assert.equal(room.state.wssHopLimit,advertisedHops);
+    const metadata=rows.find(e=>e.type==='GATEWAY_INFO');assert(metadata);gateway.send(metadata);
+    await until(()=>room.gatewayInfo?.hopLimit===metadata.hopLimit);
+    assert.equal(gateway.messages.find(e=>e.type==='AUTH_GATEWAY_SUCCESS').wssHopLimit,undefined);
+    assert.equal(room.state.wssHopLimit,metadata.hopLimit);
     coord=await connect(url); coord.send({type:'AUTH',room:'ROOM1',key:'coord-secret',token:token('test-coordinator')});
     await until(()=>coord.messages.some(e=>e.type==='INIT_STATE'));
     assert(api.gatewayStatus(room).online);
@@ -117,9 +121,9 @@ async function connect(url) {
       await until(()=>gateway.messages.some(e=>e.type===type));
       const cmd=gateway.messages.find(e=>e.type===type); assert.equal(cmd.targetNodeId,0xaabbccdd); assert.equal(cmd.isVirtual,true);
     }
-    gateway.send({type:'GATEWAY_HEARTBEAT',gatewayInfo:rows.find(e=>e.type==='AUTH_GATEWAY').gatewayInfo});
+    gateway.send({type:'GATEWAY_HEARTBEAT',timestamp:Date.now()});
     await until(()=>gateway.messages.some(e=>e.type==='GATEWAY_HEARTBEAT_ACK'));
-    assert(gateway.messages.find(e=>e.type==='GATEWAY_HEARTBEAT_ACK').timestamp>=1577836800000);
+    assert(gateway.messages.find(e=>e.type==='GATEWAY_HEARTBEAT_ACK').timestamp_ms>=1577836800000);
     assert(!gateway.messages.some(e=>e.type==='ERROR'),JSON.stringify(gateway.messages.filter(e=>e.type==='ERROR')));
     console.log('Real Relay WSS: auth, sanitized telemetry, live tracks, addressed chat, late ACK, diagnostic commands and clock ACK passed');
   } finally {

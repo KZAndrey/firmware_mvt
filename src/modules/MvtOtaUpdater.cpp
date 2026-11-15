@@ -96,7 +96,7 @@ bool MvtOtaUpdater::start(const cJSON *command,const std::string &room,uint32_t 
     auto reject=[this](const char *reason){startRejection=reason;return false;};
     if(active()||workerRunning())return reject("UPDATE_BUSY");
     if(!supported())return reject("UPDATE_UNSUPPORTED");
-    if(std::string(text(command,"transfer"))!="wss-chunks-v2")return reject("UPDATE_TRANSFER");
+    if(std::string(text(command,"transfer"))!="wss-binary-v1")return reject("UPDATE_TRANSFER");
     if(std::string(text(command,"roomId"))!=room||num(command,"nodeId")!=id)return reject("UPDATE_TARGET_CHANGED");
     const auto *m=cJSON_GetObjectItemCaseSensitive(command,"manifest");
     const std::string release=text(m,"releaseId"),v=text(m,"version"),h=text(m,"sha256"),imagePath=text(m,"imagePath"),job=text(command,"jobId");
@@ -141,6 +141,21 @@ bool MvtOtaUpdater::chunk(const cJSON *command){
     if(mbedtls_base64_decode(incoming.data,sizeof(incoming.data),&incoming.length,(const uint8_t *)data,encoded)!=0||
        incoming.length!=std::min(size_t(2048),size_t(bytes-incoming.offset)))return false;
     // One bounded chunk in flight; duplicates never replace the next offset.
+    offeredOffset=incoming.offset;
+    if(xQueueSend(chunks,&incoming,0)!=pdPASS){offeredOffset=UINT32_MAX;return false;}
+    return true;
+}
+bool MvtOtaUpdater::chunkBinary(const MvtWssWire::FirmwareChunk &command){
+    auto same=[](const MvtWssWire::Bytes &value,const std::string &expected){
+        return value.data&&value.size==expected.size()&&!memcmp(value.data,expected.data(),value.size);
+    };
+    if(state.load()!=Downloading||cancelRequested.load()||!chunks||
+       !same(command.job,jobId)||!same(command.room,roomId)||command.node!=nodeId||
+       command.offset>=bytes||command.offset!=downloadOffset.load()||
+       offeredOffset.load()==command.offset||!command.data.data||
+       command.data.size!=std::min(size_t(2048),size_t(bytes-command.offset)))return false;
+    Chunk incoming{};incoming.offset=command.offset;incoming.length=command.data.size;
+    memcpy(incoming.data,command.data.data,incoming.length);
     offeredOffset=incoming.offset;
     if(xQueueSend(chunks,&incoming,0)!=pdPASS){offeredOffset=UINT32_MAX;return false;}
     return true;

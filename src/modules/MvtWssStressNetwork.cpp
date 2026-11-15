@@ -21,7 +21,7 @@ extern "C" unsigned mvt_stress_wifi_trace_snapshot(uint32_t pcs[16],uint32_t met
 
 namespace {
 int probe=-1, phase=0;
-uint32_t peer=0, dns=0, started=0, expires=0, lastAutomatic=0, seen=0;
+uint32_t peer=0, dns=0, started=0, expires=0;
 const uint8_t query[]={0x4d,0x56,1,0,0,1,0,0,0,0,0,0,8,'m','o','v','e','t','a','i','n',3,'a','p','p',0,0,1,0,1};
 void closeProbe(){if(probe>=0){close(probe);probe=-1;}phase=0;}
 void tcpStart(){
@@ -98,13 +98,9 @@ void mvtStressNetStart(){
 }
 void mvtStressNetTick(){
     const uint32_t now=millis();
-    if(!phase){
-        MvtWssDiagnostic d{};
-        if(mvt_wss_latest_diagnostic(&d)&&d.sequence!=seen&&uint32_t(now-lastAutomatic)>30000){
-            seen=d.sequence;lastAutomatic=now;mvtStressNetStart();
-        }
-        return;
-    }
+    // Active probes are explicit USB tests only. Observing a failure must not
+    // allocate more sockets or inject traffic into an already starved network.
+    if(!phase)return;
     if(phase==1){
         uint8_t response[512];sockaddr_in source{};socklen_t n=sizeof(source);
         const int rc=recvfrom(probe,response,sizeof(response),MSG_DONTWAIT,reinterpret_cast<sockaddr*>(&source),&n);

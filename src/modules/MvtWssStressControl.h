@@ -15,7 +15,7 @@ inline unsigned mvtStressDecode(const uint8_t *p, size_t n) {
         if (!(p[i]&0x80)) {
             if (i!=n-1 || (value&0xffffff00u)!=0x4d560000u) return 0;
             const unsigned command=value&0xff;
-            return command>=1 && command<=18 ? command : 0;
+            return command>=1 && command<=19 ? command : 0;
         }
     }
     return 0;

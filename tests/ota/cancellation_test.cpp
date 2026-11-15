@@ -4,7 +4,11 @@
 #include "configuration.h"
 #include "Arduino.h"
 #include "NodeDB.h"
+#include <atomic>
+#include <string>
+#define private public
 #include "modules/MvtOtaUpdater.h"
+#undef private
 #include "mbedtls/pk.h"
 #include "mbedtls/sha256.h"
 #include <cassert>
@@ -48,7 +52,7 @@ QueueHandle_t xQueueCreate(unsigned count,size_t size){assert(count==1&&size==si
 void vQueueDelete(QueueHandle_t){assert(queuesLive==1);--queuesLive;queue.data.clear();}
 int xQueueReset(QueueHandle_t){queue.full=false;return pdPASS;}
 int xQueueOverwrite(QueueHandle_t,const void *p){memcpy(queue.data.data(),p,queue.size);queue.full=true;return pdPASS;}
-int xQueueSend(QueueHandle_t,const void *p,unsigned){return xQueueOverwrite(&queue,p);}
+int xQueueSend(QueueHandle_t,const void *p,unsigned){return queue.full?0:xQueueOverwrite(&queue,p);}
 int xQueueReceive(QueueHandle_t,void *p,unsigned){
     ++receives;
     if(mode==4)return 0;
@@ -87,7 +91,7 @@ void mbedtls_sha256_free(mbedtls_sha256_context *){--shaLive;}
 
 static cJSON *command(){
     cJSON *j=cJSON_CreateObject(),*m=cJSON_CreateObject();
-    cJSON_AddStringToObject(j,"transfer","wss-chunks-v2");cJSON_AddStringToObject(j,"roomId","ROOM1");
+    cJSON_AddStringToObject(j,"transfer","wss-binary-v1");cJSON_AddStringToObject(j,"roomId","ROOM1");
     cJSON_AddNumberToObject(j,"nodeId",db.getNodeNum());cJSON_AddStringToObject(j,"jobId","test-job");
     cJSON_AddItemToObject(j,"manifest",m);cJSON_AddNumberToObject(m,"schema",1);
     cJSON_AddStringToObject(m,"model","heltec-v3");cJSON_AddStringToObject(m,"chip","esp32s3");
@@ -98,6 +102,32 @@ static cJSON *command(){
     cJSON_AddStringToObject(m,"imagePath","/firmware/heltec-v3/test-release.bin");return j;
 }
 int main(){
+    {
+        MvtOtaUpdater binary;
+        binary.state=MvtOtaUpdater::Downloading;binary.jobId="job";binary.roomId="ROOM1";
+        binary.nodeId=123;binary.bytes=2049;
+        binary.chunks=xQueueCreate(1,sizeof(Chunk));queue.full=false;
+        uint8_t bytes[2048];for(size_t i=0;i<sizeof(bytes);++i)bytes[i]=uint8_t(i);
+        MvtWssWire::FirmwareChunk block;
+        block.job.data=reinterpret_cast<const uint8_t *>("job");block.job.size=3;
+        block.room.data=reinterpret_cast<const uint8_t *>("ROOM1");block.room.size=5;
+        block.node=123;block.data.data=bytes;block.data.size=sizeof(bytes);
+        block.node=124;assert(!binary.chunkBinary(block));block.node=123;
+        block.job.size=2;assert(!binary.chunkBinary(block));block.job.size=3;
+        block.room.size=4;assert(!binary.chunkBinary(block));block.room.size=5;
+        block.offset=1;assert(!binary.chunkBinary(block));block.offset=0;
+        block.data.size=2049;assert(!binary.chunkBinary(block));block.data.size=2048;
+        assert(binary.chunkBinary(block));assert(queue.full);
+        assert(!binary.chunkBinary(block));
+        const auto *stored=reinterpret_cast<const Chunk *>(queue.data.data());
+        assert(stored->length==2048&&!memcmp(stored->data,bytes,2048));
+        queue.full=false;binary.downloadOffset=2048;block.offset=2048;block.data.size=1;
+        binary.cancelRequested=true;assert(!binary.chunkBinary(block));binary.cancelRequested=false;
+        queue.full=true;assert(!binary.chunkBinary(block));assert(binary.offeredOffset==UINT32_MAX);
+        queue.full=false;assert(binary.chunkBinary(block));
+        assert(reinterpret_cast<const Chunk *>(queue.data.data())->length==1);
+        vQueueDelete(binary.chunks);binary.chunks=nullptr;queue.full=false;
+    }
     mvtOtaUpdater.begin();
     partitionLookupForbidden=true;
     for(int i=0;i<1000;++i)assert(mvtOtaUpdater.supported());

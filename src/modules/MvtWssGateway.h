@@ -90,7 +90,8 @@ private:
     uint32_t connectStartedMs = 0;
     std::atomic<uint32_t> lastServerAckMs{0}, lastHeartbeatMs{0};
     bool authenticated = false, authSent = false, authBlocked = false;
-    bool snapshotPending = false;
+    bool snapshotPending = false, gatewayInfoPending = true;
+    uint32_t lastGatewayInfoMs = 0;
     const char *displayError = nullptr;
     int lastWifiStatus = -1;
     uint32_t lastConnectAttemptMs = 0, authStartedMs = 0;
@@ -120,12 +121,14 @@ private:
     void publish(cJSON *);
     void sendAuthGateway();
     void sendHeartbeat();
+    void sendGatewayInfo();
     void sendSnapshot();
     cJSON *gatewayInfo();
     cJSON *nodeDocument(uint32_t, bool = false);
     void publishNode(cJSON *);
     void publishWaypoint(cJSON *);
-    void handleIncomingCommand(const char *);
+    void handleIncomingCommand(const uint8_t *,size_t);
+    void handleIncomingDocument(cJSON *);
     void status(uint32_t, const char *, const char *encryption = nullptr, const char *errorCode = nullptr);
     void finishDiagnostic(const Pending &, bool, const meshtastic_MeshPacket * = nullptr,
                           const meshtastic_Telemetry * = nullptr);
