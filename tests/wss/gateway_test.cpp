@@ -22,6 +22,7 @@ RadioLibInterface *RadioLibInterface::instance = &testRadioInfo;
 #include <new>
 static bool rejectCppAllocation=false;
 bool testAdmissionFull=false;
+bool testAcknowledgeChat=true;
 size_t testDmaFree=50000,testDmaLargest=20000;
 static unsigned jsonAllocations=0,jsonLive=0;
 static bool rejectJsonAllocation=false;
@@ -142,6 +143,15 @@ void command(MvtWssGateway &g, const char *text) {
 void healthyTick(MvtWssGateway &g) {
     if(g.authenticated)g.handleIncomingDocument(cJSON_Parse("{\"type\":\"GATEWAY_HEARTBEAT_ACK\",\"timestamp\":1700000000000}"));
     g.runOnce();
+    if(testAcknowledgeChat && !testSent.empty()) {
+        auto sent=parse(testSent.back());
+        if(std::string(sget(sent.get(),"type"))=="CHAT_MESSAGE") {
+            auto *message=cJSON_GetObjectItem(sent.get(),"message");
+            const auto ack=std::string("{\"type\":\"CHAT_STATUS_UPDATE\",\"status\":\"RECEIVED\",\"id\":")+
+                std::to_string(uint32_t(nget(message,"id")))+"}";
+            g.handleIncomingDocument(cJSON_Parse(ack.c_str()));
+        }
+    }
 }
 int main(int argc, char **argv) {
     CHECK(mvtOtaHealth::ready(true,true,true,1000,27260,16372));
@@ -553,6 +563,36 @@ int main(int argc, char **argv) {
     p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes)); g.handleReceived(p);
     CHECK(g.nodes.count("!aabbccdd_mv") == 1); command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}"); flush(g);
     result = lastEvent(g, "NODE_UPDATE"); CHECK(std::string(sget(cJSON_GetObjectItem(result.get(), "node"), "callsign")) == "Offline");
+    // A private standard radio text received offline must survive until auth.
+    {
+        g.authenticated = false;
+        auto rx = incoming(0xb7418dc7, 0, meshtastic_PortNum_TEXT_MESSAGE_APP);
+        rx.pki_encrypted = true;
+        const char *text = "offline private delivery regression";
+        rx.decoded.payload.size = strlen(text);
+        memcpy(rx.decoded.payload.bytes, text, strlen(text));
+        g.handleReceived(rx);
+        CHECK(!g.outgoing.empty());
+        testAcknowledgeChat=false;
+        command(g, "{\"type\":\"AUTH_GATEWAY_SUCCESS\"}");
+        auto delivered = lastEvent(g, "CHAT_MESSAGE");
+        auto *message = cJSON_GetObjectItem(delivered.get(), "message");
+        CHECK(nget(message, "id") == rx.id);
+        CHECK(nget(message, "senderId") == rx.from);
+        CHECK(std::string(sget(message, "text")) == text);
+        CHECK(std::string(sget(message, "encryption")) == "PKI");
+        CHECK(!g.outgoing.empty()); // A socket write is not a Relay receipt.
+        const auto sentCount=testSent.size();
+        testMillis+=15001;healthyTick(g);
+        CHECK(testSent.size()>sentCount); // Lost receipts trigger bounded replay.
+        command(g,"{\"type\":\"CHAT_STATUS_UPDATE\",\"status\":\"DELIVERED\",\"id\":1}");
+        CHECK(!g.outgoing.empty()); // Radio status cannot release a Relay event.
+        const auto receipt=std::string("{\"type\":\"CHAT_STATUS_UPDATE\",\"status\":\"RECEIVED\",\"id\":")+std::to_string(rx.id)+"}";
+        const auto receiptBytes=binaryFixture(receipt);
+        g.handleIncomingCommand(reinterpret_cast<const uint8_t *>(receiptBytes.data()),receiptBytes.size());
+        CHECK(g.outgoing.empty());
+        testAcknowledgeChat=true;
+    }
     // Waypoint deletion removes local replay cache, so it cannot resurrect.
     payload.flags = 1; payload.name = "Target"; p.id++;
     p.decoded.payload.size = mvt::encode(payload, p.decoded.payload.bytes, sizeof(p.decoded.payload.bytes)); g.handleReceived(p); CHECK(g.waypoints.size() == 1);
@@ -579,6 +619,18 @@ int main(int argc, char **argv) {
     CHECK(g.waypoints.size() == 2);
     command(g, "{\"type\":\"WAYPOINT_DELETED\",\"latitude\":43.25,\"longitude\":76.9,\"title\":\"Fast Location\"}");
     CHECK(g.waypoints.size() == 1); CHECK(g.waypoints.begin()->second.find("SOS Emergency") != std::string::npos);
+    // Bulk clear crosses the binary decoder and preserves genuinely newer points.
+    {
+        MvtWssGateway cleared;cleared.authenticated=true;
+        cleared.publishWaypoint(cJSON_Parse("{\"title\":\"old\",\"latitude\":43,\"longitude\":76,\"timestampSec\":1700000000}"));
+        cleared.publishWaypoint(cJSON_Parse("{\"title\":\"new\",\"latitude\":44,\"longitude\":77,\"timestampSec\":1700000002}"));
+        const auto bytes=binaryFixture("{\"type\":\"CMD_DELETE_WAYPOINT\",\"timestampSec\":1700000001}");
+        cleared.handleIncomingCommand(reinterpret_cast<const uint8_t *>(bytes.data()),bytes.size());
+        CHECK(!cleared.inputFault);
+        CHECK(cleared.waypoints.size()==1);
+        CHECK(cleared.waypoints.begin()->second.find("new")!=std::string::npos);
+        CHECK(cleared.outgoing.size()==1);
+    }
     // Queue count alone must not permit eight maximum-size RX frames or
     // thirty-two large offline events to occupy the entire internal heap.
     {

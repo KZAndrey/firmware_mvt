@@ -89,6 +89,7 @@ private:
     bool connecting = false;
     uint32_t connectStartedMs = 0;
     std::atomic<uint32_t> lastServerAckMs{0}, lastHeartbeatMs{0};
+    uint32_t awaitingChatId = 0, lastChatSendMs = 0;
     bool authenticated = false, authSent = false, authBlocked = false;
     bool snapshotPending = false, gatewayInfoPending = true;
     uint32_t lastGatewayInfoMs = 0;

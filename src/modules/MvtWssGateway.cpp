@@ -378,6 +378,7 @@ void MvtWssGateway::disconnectWs() {
     retiring = true;
     socketConnected = false; authenticated = false; authSent = false;
     connecting = false; lastServerAckMs = 0;
+    awaitingChatId = 0;
     snapshot.clear();
     std::vector<uint32_t>().swap(snapshotNodes);
     if (!transport.active()) finishDisconnect();
@@ -429,7 +430,9 @@ bool MvtWssGateway::sendDocument(cJSON *p) {
     if(!bytes)return false;
     const size_t size=MvtWssMessageCodec::encode(bytes.get(),capacity,kind,p);
     if(!size)return false;
-    const bool replay = !priority && strcmp(type,"NODE_UPDATE") && strcmp(type,"NODE_RADIO_ACTIVITY") && !cJSON_IsTrue(get(p, "snapshot"));
+    // Chat remains in outgoing until Relay acknowledges it. Do not also replay
+    // the transport copy, which would create an unbounded duplicate chain.
+    const bool replay = !priority && strcmp(type,"CHAT_MESSAGE") && strcmp(type,"NODE_UPDATE") && strcmp(type,"NODE_RADIO_ACTIVITY") && !cJSON_IsTrue(get(p, "snapshot"));
     if(!transport.sendOwned(reinterpret_cast<char *>(bytes.get()),size,free,priority,replay))return false;
     bytes.release();
     return true;
@@ -995,7 +998,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
 void MvtWssGateway::handleIncomingCommand(const uint8_t *data,size_t size) {
     MvtWssWire::View view;
     if(!MvtWssWire::decode(data,size,view)){inputFault=true;return;}
-    const bool allowed=view.kind==2||view.kind==3||view.kind==5||(view.kind>=22&&view.kind<=34);
+    const bool allowed=view.kind==2||view.kind==3||view.kind==5||view.kind==11||(view.kind>=22&&view.kind<=34);
     if(!allowed){inputFault=true;return;}
     if(view.kind==24){
         if(!authenticated||authBlocked)return;
@@ -1051,6 +1054,17 @@ void MvtWssGateway::handleIncomingDocument(cJSON *document) {
         return;
     }
     if (!authenticated || authBlocked) return;
+    if(type=="CHAT_STATUS_UPDATE") {
+        uint32_t id=0;
+        if(strcmp(str(j.get(),"status"),"RECEIVED") || !identifier(j.get(),"id",id) || !id || id!=awaitingChatId)return;
+        for(auto it=outgoing.begin();it!=outgoing.end();++it) {
+            auto e=json(cJSON_Parse(it->c_str()));
+            if(!strcmp(str(e.get(),"type"),"CHAT_MESSAGE") && number(get(e.get(),"message"),"id")==id) {
+                outgoing.erase(it);break;
+            }
+        }
+        awaitingChatId=0;return;
+    }
     if (type == "CMD_RADIO_KEY") {
         auto reply = json(event("RADIO_KEY_RESULT"));
         setString(reply.get(), "requestId", str(j.get(), "requestId"));
@@ -1128,10 +1142,14 @@ void MvtWssGateway::handleIncomingDocument(cJSON *document) {
     }
     if (type == "CMD_REFRESH_GATEWAY") { gatewayInfoPending=true; sendHeartbeat(); snapshotPending = true; return; }
     if (type == "WAYPOINT_DELETED" || type == "CMD_DELETE_WAYPOINT") {
+        // A timestamp-only command is the room owner's bulk-clear watermark.
+        // Keep points received after it; clear cached and unsent old attachments.
+        const bool bulk=!get(j.get(),"latitude")&&!get(j.get(),"longitude")&&!str(j.get(),"id")[0]&&!str(j.get(),"title")[0]&&number(j.get(),"timestampSec")>0;
+        const auto removed=[&](const cJSON *wp){return bulk ? number(wp,"timestampSec")<=number(j.get(),"timestampSec") : selectedWaypoint(wp,j.get());};
         for (auto it = waypoints.begin(); it != waypoints.end();) {
             auto wp = json(cJSON_Parse(it->second.c_str()));
-            if (selectedWaypoint(wp.get(), j.get())) {
-                waypoints.erase(it); break;
+            if (removed(wp.get())) {
+                it=waypoints.erase(it); if(!bulk)break;
             }
             else ++it;
         }
@@ -1141,7 +1159,7 @@ void MvtWssGateway::handleIncomingDocument(cJSON *document) {
             auto e = json(cJSON_Parse(it->c_str()));
             cJSON *chat = cJSON_GetObjectItemCaseSensitive(e.get(), "message");
             cJSON *wp = cJSON_GetObjectItemCaseSensitive(chat ? chat : e.get(), "waypoint");
-            if (wp && selectedWaypoint(wp, j.get())) {
+            if (wp && removed(wp)) {
                 if (!chat) { it = outgoing.erase(it); continue; }
                 cJSON_DeleteItemFromObjectCaseSensitive(chat, "waypoint"); *it = serialize(e.get());
             }
@@ -1547,8 +1565,11 @@ int32_t MvtWssGateway::runOnce() {
         auto p = json(cJSON_Parse(outgoing.front().c_str()));
         // Events captured before time sync get receive time, not 1970.
         cJSON *m = cJSON_GetObjectItemCaseSensitive(p.get(), "message");
+        const uint32_t chatId=!strcmp(str(p.get(),"type"),"CHAT_MESSAGE")?uint32_t(number(m,"id")):0;
+        if(chatId && awaitingChatId==chatId && uint32_t(millis()-lastChatSendMs)<15000)break;
         if (m && number(m, "timestampMs") < 1577836800000.0) setNumber(m, "timestampMs", double(nowMs()));
         if (!sendDocument(p.get())) break;
+        if(chatId){awaitingChatId=chatId;lastChatSendMs=millis();break;}
         outgoing.pop_front();
     }
     return mvtOtaUpdater.active()?10:100;

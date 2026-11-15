@@ -33,6 +33,7 @@ def main():
     parser.add_argument('--prefix', required=True)
     parser.add_argument('--cycles', type=int, default=50)
     parser.add_argument('--reconnect-only', action='store_true')
+    parser.add_argument('--fault-command', type=int, choices=[3,4,5,7,8,9], help='Run one fault in isolation after reconnect cycles')
     parser.add_argument('--min-largest', type=int, choices=[4096,6144], default=6144)
     parser.add_argument('--observe-seconds', type=int, default=0)
     parser.add_argument('--investigate', action='store_true')
@@ -219,9 +220,13 @@ def main():
                     if int(warm['free']) - int(latest['free']) > 8192:
                         raise RuntimeError('Free heap is over 8192 bytes below warm baseline; investigate cache and allocations before more cycles')
             if not args.reconnect_only:
-                for command, seconds in [(3, 5), (4, 30), (5, 120), (3, 5), (3, 5), (3, 5), (7, 60), (8, 0), (9, 0)]:
+                faults = [(3, 5), (4, 30), (5, 120), (3, 5), (3, 5), (3, 5), (7, 60), (8, 0), (9, 0)]
+                if args.fault_command:
+                    faults = [(args.fault_command, {3:5,4:30,5:120,7:60,8:0,9:0}[args.fault_command])]
+                for command, seconds in faults:
                     scenario(command, 'fault-' + str(command) + '-' + str(len(result['scenarios'])), seconds)
-                scenario(2, 'disconnect-after-snapshot')
+                if not args.fault_command:
+                    scenario(2, 'disconnect-after-snapshot')
             result['status'] = 'passed'
         except Exception as exc:
             result['status'] = 'stopped'
