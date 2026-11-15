@@ -173,6 +173,7 @@ double number(const cJSON *p, const char *key, double fallback = 0) {
     const cJSON *v = get(p, key); return cJSON_IsNumber(v) && std::isfinite(v->valuedouble) ? v->valuedouble : fallback;
 }
 bool selectedWaypoint(const cJSON *wp, const cJSON *selection) {
+    if(str(selection,"id")[0])return !strcmp(str(wp,"id"),str(selection,"id"));
     if (!(fabs(number(wp, "latitude", NAN) - number(selection, "latitude", NAN)) < 0.00005 &&
           fabs(number(wp, "longitude", NAN) - number(selection, "longitude", NAN)) < 0.00005)) return false;
     const std::string title = str(selection, "title");
@@ -205,6 +206,24 @@ void setString(cJSON *p, const char *k, const char *value) {
 }
 void setBool(cJSON *p, const char *k, bool value) {
     cJSON_DeleteItemFromObjectCaseSensitive(p, k); cJSON_AddBoolToObject(p, k, value);
+}
+// Same identity contract as MQTT and Android WaypointProvenance:
+// preserve the original WP1 ID when forwarding; otherwise identify the RF packet.
+std::string radioWaypointId(const cJSON *wp,uint32_t from,uint32_t packetId) {
+    for(const char *field:{"title","comment"}) {
+        const char *text=str(wp,field);
+        if(strncmp(text,"~WP1~",5))continue;
+        auto values=json(cJSON_Parse(text+5));
+        const int count=cJSON_GetArraySize(values.get());
+        if(!cJSON_IsArray(values.get())||count<4||count>6)continue;
+        const size_t limits[]={64,32,32,200,4,32};bool valid=true;
+        for(int i=0;i<count;++i){auto *v=cJSON_GetArrayItem(values.get(),i);if(!cJSON_IsString(v)||strlen(v->valuestring)>limits[i]){valid=false;break;}}
+        if(!valid)continue;
+        if(count>=5){const char *v=cJSON_GetArrayItem(values.get(),4)->valuestring;if(v[0]&&strcmp(v,"MECC"))continue;}
+        if(count==6&&cJSON_GetArrayItem(values.get(),5)->valuestring[0])return cJSON_GetArrayItem(values.get(),5)->valuestring;
+    }
+    if(!packetId)return "";
+    char id[32];snprintf(id,sizeof(id),"rx-%x-%x",unsigned(from),unsigned(packetId));return id;
 }
 bool decodeProto(const meshtastic_MeshPacket &p, const pb_msgdesc_t *fields, void *dest) {
     pb_istream_t stream = pb_istream_from_buffer(p.decoded.payload.bytes, p.decoded.payload.size);
@@ -608,7 +627,8 @@ void MvtWssGateway::publishNode(cJSON *p) {
 }
 void MvtWssGateway::publishWaypoint(cJSON *p) {
     auto owned = json(p);
-    std::string id = std::to_string(number(p, "latitude")) + ":" + std::to_string(number(p, "longitude")) + ":" + str(p, "title") + ":" + std::to_string(number(p, "timestampSec"));
+    std::string id = str(p,"id");
+    if(id.empty())id=std::to_string(number(p, "latitude")) + ":" + std::to_string(number(p, "longitude")) + ":" + str(p, "title") + ":" + std::to_string(number(p, "timestampSec"));
     std::string document=serialize(p);
     const size_t overhead=sizeof(decltype(waypoints)::value_type)+64;
     const size_t cost=id.capacity()+document.capacity()+2+overhead;
@@ -943,6 +963,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
                 cJSON_AddNumberToObject(wp, "altitude", mv.altitude); cJSON_AddNumberToObject(wp, "timestampSec", double(nowMs() / 1000));
                 cJSON_AddBoolToObject(wp, "isRadio", true); cJSON_AddBoolToObject(wp, "isTarget", mv.icon == 5);
                 cJSON_AddBoolToObject(wp, "isSos", sos);
+                const auto id=radioWaypointId(wp,from,mp.id);if(!id.empty())setString(wp,"id",id.c_str());
                 publishWaypoint(cJSON_Duplicate(wp, true)); addOwnedItem(msg, "waypoint", wp);
             }
             auto e = event("CHAT_MESSAGE"); addOwnedItem(e, "message", msg); publish(e);
@@ -989,6 +1010,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
             cJSON_AddNumberToObject(wp, "longitude", w.longitude_i / 1e7);
             cJSON_AddNumberToObject(wp, "timestampSec", double(nowMs() / 1000));
             cJSON_AddBoolToObject(wp, "isRadio", true); cJSON_AddBoolToObject(wp, "isTarget", strstr(w.name, "Target") != nullptr);
+            const auto id=radioWaypointId(wp,from,mp.id);if(!id.empty())setString(wp,"id",id.c_str());
             publishWaypoint(wp);
         }
     }
@@ -1145,7 +1167,7 @@ void MvtWssGateway::handleIncomingDocument(cJSON *document) {
         // A timestamp-only command is the room owner's bulk-clear watermark.
         // Keep points received after it; clear cached and unsent old attachments.
         const bool bulk=!get(j.get(),"latitude")&&!get(j.get(),"longitude")&&!str(j.get(),"id")[0]&&!str(j.get(),"title")[0]&&number(j.get(),"timestampSec")>0;
-        const auto removed=[&](const cJSON *wp){return bulk ? number(wp,"timestampSec")<=number(j.get(),"timestampSec") : selectedWaypoint(wp,j.get());};
+        const auto removed=[&](const cJSON *wp){return bulk ? number(wp,"timestampSec")<number(j.get(),"timestampSec") : selectedWaypoint(wp,j.get());};
         for (auto it = waypoints.begin(); it != waypoints.end();) {
             auto wp = json(cJSON_Parse(it->second.c_str()));
             if (removed(wp.get())) {

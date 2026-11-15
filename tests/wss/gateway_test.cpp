@@ -621,6 +621,26 @@ int main(int argc, char **argv) {
     CHECK(g.waypoints.size() == 1); CHECK(g.waypoints.begin()->second.find("SOS Emergency") != std::string::npos);
     // Bulk clear crosses the binary decoder and preserves genuinely newer points.
     {
+        MvtWssGateway parity;parity.authenticated=true;
+        mvt::Payload point;point.flags=1;point.lat=43;point.lon=76;point.name="Field";
+        auto packet=incoming(0xb7418dc7,0,meshtastic_PortNum_PRIVATE_APP);
+        for(const char *id:{"point-a","point-b","point-a"}) {
+            point.comment=std::string("~WP1~[\"Same place\",\"Field\",\"\",\"\",\"\",\"")+id+"\"]";
+            packet.id++;
+            packet.decoded.payload.size=mvt::encode(point,packet.decoded.payload.bytes,sizeof(packet.decoded.payload.bytes));
+            parity.handleReceived(packet);
+        }
+        CHECK(parity.waypoints.size()==2); // New ID is new; forwarded ID is unchanged.
+        CHECK(parity.waypoints.count("point-a")==1&&parity.waypoints.count("point-b")==1);
+        command(parity,"{\"type\":\"WAYPOINT_DELETED\",\"id\":\"point-a\"}");
+        CHECK(parity.waypoints.size()==1&&parity.waypoints.count("point-b")==1);
+        point.comment="Plain legacy point";packet.id=0x123;
+        packet.decoded.payload.size=mvt::encode(point,packet.decoded.payload.bytes,sizeof(packet.decoded.payload.bytes));
+        parity.handleReceived(packet);
+        CHECK(parity.waypoints.count("rx-b7418dc7-123")==1);
+    }
+    // Bulk clear crosses the binary decoder and preserves genuinely newer points.
+    {
         MvtWssGateway cleared;cleared.authenticated=true;
         cleared.publishWaypoint(cJSON_Parse("{\"title\":\"old\",\"latitude\":43,\"longitude\":76,\"timestampSec\":1700000000}"));
         cleared.publishWaypoint(cJSON_Parse("{\"title\":\"new\",\"latitude\":44,\"longitude\":77,\"timestampSec\":1700000002}"));
