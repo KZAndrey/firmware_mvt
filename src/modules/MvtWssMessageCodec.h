@@ -32,6 +32,14 @@ inline bool utf8(const uint8_t *p,size_t n){
         if(c<minimum||c>0x10ffff||(c>=0xd800&&c<=0xdfff))return false;
     }return true;
 }
+// Match JavaScript/Kotlin string limits (UTF-16 units), while rejecting invalid UTF-8.
+inline size_t textUnits(const char *text){
+    const auto *p=reinterpret_cast<const uint8_t *>(text);const size_t n=strlen(text);
+    if(!utf8(p,n))return SIZE_MAX;
+    size_t count=0;
+    for(size_t i=0;i<n;++i)if((p[i]&0xc0)!=0x80)count+=p[i]>=0xf0?2:1;
+    return count;
+}
 inline int base64Digit(char c){
     if(c>='A'&&c<='Z')return c-'A';if(c>='a'&&c<='z')return c-'a'+26;
     if(c>='0'&&c<='9')return c-'0'+52;if(c=='+')return 62;if(c=='/')return 63;return -1;

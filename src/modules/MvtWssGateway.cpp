@@ -215,12 +215,16 @@ std::string radioWaypointId(const cJSON *wp,uint32_t from,uint32_t packetId) {
         if(strncmp(text,"~WP1~",5))continue;
         auto values=json(cJSON_Parse(text+5));
         const int count=cJSON_GetArraySize(values.get());
-        if(!cJSON_IsArray(values.get())||count<4||count>6)continue;
-        const size_t limits[]={64,32,32,200,4,32};bool valid=true;
-        for(int i=0;i<count;++i){auto *v=cJSON_GetArrayItem(values.get(),i);if(!cJSON_IsString(v)||strlen(v->valuestring)>limits[i]){valid=false;break;}}
+        if(!cJSON_IsArray(values.get())||(count!=4&&count!=5&&count!=6&&count!=8))continue;
+        const size_t limits[]={64,32,32,200,4,32,16,13};bool valid=true;
+        for(int i=0;i<count;++i){auto *v=cJSON_GetArrayItem(values.get(),i);if(!cJSON_IsString(v)||MvtWssMessageCodec::textUnits(v->valuestring)>limits[i]){valid=false;break;}}
         if(!valid)continue;
         if(count>=5){const char *v=cJSON_GetArrayItem(values.get(),4)->valuestring;if(v[0]&&strcmp(v,"MECC"))continue;}
-        if(count==6&&cJSON_GetArrayItem(values.get(),5)->valuestring[0])return cJSON_GetArrayItem(values.get(),5)->valuestring;
+        if(count==8){
+            const char *ev=cJSON_GetArrayItem(values.get(),6)->valuestring,*at=cJSON_GetArrayItem(values.get(),7)->valuestring;
+            if(strlen(ev)!=16||strspn(ev,"0123456789abcdef")!=16||strlen(at)!=13||strspn(at,"0123456789")!=13||strtoull(at,nullptr,10)<1577836800000ULL)continue;
+        }
+        if(count>=6&&cJSON_GetArrayItem(values.get(),5)->valuestring[0])return cJSON_GetArrayItem(values.get(),5)->valuestring;
     }
     if(!packetId)return "";
     char id[32];snprintf(id,sizeof(id),"rx-%x-%x",unsigned(from),unsigned(packetId));return id;
@@ -925,6 +929,14 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
     setNumber(n.get(), "lastUpdateMs", double(nowMs())); setNumber(n.get(), "snr", mp.rx_snr);
     setNumber(n.get(), "rssi", mp.rx_rssi); setNumber(n.get(), "hops", hops);
     if (hasMv) {
+        auto hardware=json(nodeDocument(from,false));
+        const std::string known=str(hardware.get(),"callsign");
+        const bool coordinator=mv.name.compare(0,4,"MVT_")==0;
+        const std::string sender=coordinator||mv.name=="METEO_BOT"||known.empty()||known[0]=='!'?mv.name:known;
+        std::string classification=mv.name+" "+mv.comment;
+        std::transform(classification.begin(),classification.end(),classification.begin(),[](unsigned char c){return char(std::tolower(c));});
+        const bool target=mv.icon==5||classification.find("target")!=std::string::npos;
+        const bool fast=classification.find("fast location")!=std::string::npos;
         if (mv.flags & 8) {
             std::string k = key(from, true); nodes.erase(k);
             auto e = event("NODE_REMOVE"); cJSON_AddStringToObject(e, "nodeKey", k.c_str()); publish(e);
@@ -946,7 +958,7 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
             cJSON_AddNumberToObject(msg, "id", mp.id); cJSON_AddNumberToObject(msg, "senderId", from);
             cJSON_AddNumberToObject(msg, "recipientId", mp.to);
             if (mp.to != NODENUM_BROADCAST) cJSON_AddStringToObject(msg, "encryption", mp.pki_encrypted ? "PKI" : "CHANNEL");
-            cJSON_AddStringToObject(msg, "senderCallsign", mv.name.c_str());
+            cJSON_AddStringToObject(msg, "senderCallsign", sender.c_str());
             cJSON_AddStringToObject(msg, "text", mv.comment.c_str());
             cJSON_AddBoolToObject(msg, "viaMecc", (mv.flags & 2) && (mv.flags & 0x40));
             cJSON_AddNumberToObject(msg, "timestampMs", double(nowMs()));
@@ -955,13 +967,14 @@ ProcessMessage MvtWssGateway::handleReceived(const meshtastic_MeshPacket &mp) {
             if ((mv.flags & (1 | 4)) && (mv.lat != 0 || mv.lon != 0)) {
                 auto wp = cJSON_CreateObject();
                 const bool sos = mv.flags & 4;
-                const std::string title = !mv.comment.empty() && !(sos && (mv.comment == "SOS" || mv.comment == u8"СОС"))
-                    ? mv.comment : sos ? "SOS Emergency" : mv.icon == 5 ? "Target Point" : "Waypoint";
+                std::string title = !mv.comment.empty() && !(sos && (mv.comment == "SOS" || mv.comment == u8"СОС"))
+                    ? mv.comment : sos ? "SOS Emergency" : target ? "Target Point" : fast ? "Fast Location" : "Waypoint";
+                if(title=="Target Point - Target Point")title="Target Point";
                 cJSON_AddStringToObject(wp, "title", title.c_str());
-                cJSON_AddStringToObject(wp, "comment", ("From " + mv.name).c_str());
+                cJSON_AddStringToObject(wp, "comment", ("From " + sender).c_str());
                 cJSON_AddNumberToObject(wp, "latitude", mv.lat); cJSON_AddNumberToObject(wp, "longitude", mv.lon);
                 cJSON_AddNumberToObject(wp, "altitude", mv.altitude); cJSON_AddNumberToObject(wp, "timestampSec", double(nowMs() / 1000));
-                cJSON_AddBoolToObject(wp, "isRadio", true); cJSON_AddBoolToObject(wp, "isTarget", mv.icon == 5);
+                cJSON_AddBoolToObject(wp, "isRadio", true); cJSON_AddBoolToObject(wp, "isTarget", target);
                 cJSON_AddBoolToObject(wp, "isSos", sos);
                 const auto id=radioWaypointId(wp,from,mp.id);if(!id.empty())setString(wp,"id",id.c_str());
                 publishWaypoint(cJSON_Duplicate(wp, true)); addOwnedItem(msg, "waypoint", wp);

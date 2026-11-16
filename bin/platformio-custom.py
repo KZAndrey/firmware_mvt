@@ -109,7 +109,7 @@ Import("projenv")
 prefsLoc = projenv["PROJECT_DIR"] + "/version.properties"
 verObj = readProps(prefsLoc)
 if env.get("PIOENV") == "heltec-v3":
-    verObj["long"] = "2.7.15.15.11b"
+    verObj["long"] = "2.7.15.16.11"
     local_build_name = os.environ.get("MVT_LOCAL_BUILD_NAME", "")
     if local_build_name:
         if not local_build_name.isalnum() or len(local_build_name) > 12:
@@ -136,7 +136,7 @@ if env.get("PIOENV") == "heltec-v3":
         projenv.Append(CPPDEFINES=[("MVT_WSS_STRESS_TEST", 1)])
         env.Append(LINKFLAGS=["-Wl,--wrap=esp_wifi_init"])
     verObj["short"] = "2.7.15"
-    generation = int(os.environ.get("MVT_OTA_GENERATION", "40"))
+    generation = int(os.environ.get("MVT_OTA_GENERATION", "41"))
     if generation < 0 or generation > 2147483647:
         raise ValueError("Invalid OTA generation")
     ota_header = join(env["PROJECT_DIR"], "src/modules/MvtOtaGeneration.h")

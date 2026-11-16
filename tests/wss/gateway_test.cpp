@@ -634,6 +634,12 @@ int main(int argc, char **argv) {
         CHECK(parity.waypoints.count("point-a")==1&&parity.waypoints.count("point-b")==1);
         command(parity,"{\"type\":\"WAYPOINT_DELETED\",\"id\":\"point-a\"}");
         CHECK(parity.waypoints.size()==1&&parity.waypoints.count("point-b")==1);
+        point.comment=std::string("~WP1~[\"")+std::string(u8"Лагерь Лагерь Лагерь Лагерь Лагерь Лагерь")+"\",\"Field\",\"\",\"\",\"\",\"unicode-point\",\"1234567890abcdef\",\"1794800000000\"]";
+        packet.id++;
+        packet.decoded.payload.size=mvt::encode(point,packet.decoded.payload.bytes,sizeof(packet.decoded.payload.bytes));
+        CHECK(packet.decoded.payload.size>0);
+        parity.handleReceived(packet);
+        CHECK(parity.waypoints.count("unicode-point")==1);
         point.comment="Plain legacy point";packet.id=0x123;
         packet.decoded.payload.size=mvt::encode(point,packet.decoded.payload.bytes,sizeof(packet.decoded.payload.bytes));
         parity.handleReceived(packet);
